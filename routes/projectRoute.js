@@ -28,4 +28,50 @@ router.get("/", authMiddleware, async (req, res) => {
   res.json(projects);
 });
 
+// Get Single Project
+router.get("/:id", authMiddleware, async (req, res) => {
+  try {
+    const project = await Project.findById(req.params.id);
+
+    if (!project) {
+      return res.status(404).json({ message: "Project not found" });
+    }
+
+    // Verify ownership
+    if (project.userId.toString() !== req.user.id) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    res.json(project);
+  } catch (error) {
+    console.error("Get project error:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
+// Get Project Status
+router.get("/:id/status", authMiddleware, async (req, res) => {
+  try {
+    const project = await Project.findById(req.params.id);
+
+    if (!project) {
+      return res.status(404).json({ message: "Project not found" });
+    }
+
+    // Verify ownership
+    if (project.userId.toString() !== req.user.id) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    res.json({
+      installed: project.installed || false,
+      lastSeen: project.lastSeen,
+      lastUrl: project.lastUrl
+    });
+  } catch (error) {
+    console.error("Get project status error:", error);
+    res.status(500).json({ message: "Internal server error" });
+  }
+});
+
 module.exports = router;

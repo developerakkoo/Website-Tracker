@@ -4,6 +4,9 @@ const projectSchema = new mongoose.Schema({
   userId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
   name: String,
   apiKey: String,
+  installed: { type: Boolean, default: false },
+  lastSeen: Date,
+  lastUrl: String,
 },{timestamps:true});
 
 module.exports = mongoose.model("Project", projectSchema);

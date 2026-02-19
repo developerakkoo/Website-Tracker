@@ -2,13 +2,25 @@
 <html>
 <head>
   <title>Test Site</title>
+  <script>
+    (function(w,d,s,u,k,b){
+      w.__trackerKey = k;
+      w.__trackerBase = b;
+      var js = d.createElement(s);
+      js.async = true;
+      js.src = u;
+      var f = d.getElementsByTagName(s)[0];
+      f.parentNode.insertBefore(js,f);
+    })(window, document, "script", 
+       "http://localhost:3000/tracker.js", 
+       "proj_uok1DBRJb22G3UeG3-Q0vvadkaKT7Axo",
+       "http://localhost:3000");
+    </script>
 </head>
 <body>
   <h1>Testing Tracker</h1>
   <button>Click Me</button>
 
   <div style="height:2000px; background-color: aqua;"></div>
-
-  <script src="./tracker.js"></script>
 </body>
 </html>
