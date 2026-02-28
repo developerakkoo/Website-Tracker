@@ -1,7 +1,27 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Test Site</title>
+  <title>Master the Markets – Stock Trading Course</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: system-ui, sans-serif; line-height: 1.5; color: #1a1a1a; }
+    header { background: linear-gradient(135deg, #0f4c2a 0%, #1a6b3a 100%); color: #fff; padding: 4rem 1.5rem; text-align: center; min-height: 40vh; display: flex; flex-direction: column; justify-content: center; }
+    header h1 { margin: 0 0 0.75rem; font-size: 2.25rem; }
+    header p { margin: 0 0 1.5rem; opacity: 0.95; max-width: 32rem; margin-left: auto; margin-right: auto; }
+    .cta { display: inline-block; padding: 0.75rem 1.75rem; background: #fff; color: #0f4c2a; border: none; border-radius: 6px; font-weight: 600; font-size: 1rem; cursor: pointer; text-decoration: none; }
+    .cta:hover { background: #f0f0f0; }
+    section { padding: 3rem 1.5rem; max-width: 48rem; margin: 0 auto; }
+    section h2 { margin: 0 0 1.5rem; font-size: 1.5rem; color: #0f4c2a; }
+    .benefits { display: grid; gap: 1.5rem; }
+    .benefit { padding: 1.25rem; border: 1px solid #e0e0e0; border-radius: 8px; }
+    .benefit h3 { margin: 0 0 0.5rem; font-size: 1.1rem; }
+    .benefit p { margin: 0 0 0.75rem; font-size: 0.95rem; color: #444; }
+    .benefit a { color: #1a6b3a; font-weight: 500; }
+    .pricing { background: #f8f8f8; text-align: center; padding: 3rem 1.5rem; }
+    .pricing p { margin: 0 0 1rem; }
+    footer { padding: 1.5rem; text-align: center; font-size: 0.875rem; color: #666; border-top: 1px solid #eee; }
+    footer a { color: #1a6b3a; }
+  </style>
   <script>
     (function(w,d,s,u,k,b){
       w.__trackerKey = k;
@@ -13,14 +33,47 @@
       f.parentNode.insertBefore(js,f);
     })(window, document, "script", 
        "http://localhost:3000/tracker.js", 
-       "proj_uok1DBRJb22G3UeG3-Q0vvadkaKT7Axo",
+       "proj_9HoGSQgoE657o83pJaGAa7aQUr4KYEGO",
        "http://localhost:3000");
     </script>
 </head>
 <body>
-  <h1>Testing Tracker</h1>
-  <button>Click Me</button>
+  <header>
+    <h1>Master the Stock Market</h1>
+    <p>Learn to trade with confidence. Our course gives you expert-led lessons, real-world strategies, and lifetime access so you can build lasting wealth.</p>
+    <button class="cta" id="cta-hero">Enroll Now</button>
+  </header>
 
-  <div style="height:2000px; background-color: aqua;"></div>
+  <section class="benefits-section" style="min-height: 50vh;">
+    <h2>What You Get</h2>
+    <div class="benefits">
+      <div class="benefit">
+        <h3>Expert-led lessons</h3>
+        <p>Step-by-step modules from professional traders with years of market experience.</p>
+        <a href="#pricing" class="benefit-link">Learn more</a>
+      </div>
+      <div class="benefit">
+        <h3>Real-world strategies</h3>
+        <p>Proven techniques for entry, exit, and risk management you can use immediately.</p>
+        <a href="#pricing" class="benefit-link">Learn more</a>
+      </div>
+      <div class="benefit">
+        <h3>Lifetime access</h3>
+        <p>One-time enrollment. Watch and rewatch at your own pace, forever.</p>
+        <a href="#pricing" class="benefit-link">Learn more</a>
+      </div>
+    </div>
+  </section>
+
+  <section class="pricing" id="pricing" style="min-height: 35vh;">
+    <h2>Join the Course</h2>
+    <p>Limited spots. One-time payment — no subscription.</p>
+    <button class="cta" id="cta-pricing">Join the course</button>
+  </section>
+
+  <footer>
+    <p>© 2025 Stock Course. For educational purposes.</p>
+    <a href="#contact">Contact</a> · <a href="#faq">FAQ</a>
+  </footer>
 </body>
 </html>

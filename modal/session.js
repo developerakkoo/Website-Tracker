@@ -25,6 +25,13 @@ const sessionSchema = new mongoose.Schema({
     height: Number
   },
 
+  viewport: {
+    width: Number,
+    height: Number
+  },
+
+  deviceType: String,
+
   startedAt: {
     type: Date,
     default: Date.now,
@@ -44,6 +51,10 @@ const sessionSchema = new mongoose.Schema({
   eventCount: {
     type: Number,
     default: 0
+  },
+
+  snapshot: {
+    type: String
   }
 
 }, { timestamps: true });

@@ -1,5 +1,6 @@
 const express = require("express");
 const Project = require("../modal/project");
+const Session = require("../modal/session");
 const authMiddleware = require("../middleware/authMiddleware");
 const generateApiKey = require("../utils/generateAPIKey");
 
@@ -26,6 +27,28 @@ router.post("/", authMiddleware, async (req, res) => {
 router.get("/", authMiddleware, async (req, res) => {
   const projects = await Project.find({ userId: req.user.id });
   res.json(projects);
+});
+
+// Get Project Sessions (must be before /:id)
+router.get("/:id/sessions", authMiddleware, async (req, res) => {
+  try {
+    const project = await Project.findById(req.params.id);
+    if (!project) {
+      return res.status(404).json({ message: "Project not found" });
+    }
+    if (project.userId.toString() !== req.user.id) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+    const sessions = await Session.find({ projectId: project._id })
+      .sort({ startedAt: -1 })
+      .limit(100)
+      .select("sessionId startedAt url eventCount duration deviceType viewport")
+      .lean();
+    return res.json(sessions);
+  } catch (error) {
+    console.error("Get project sessions error:", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
 });
 
 // Get Single Project

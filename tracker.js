@@ -57,28 +57,44 @@
     } catch (e) {}
   }
   
-  // Initialize session
+  // Initialize session (waits for init so capture finds the session)
   function initSession() {
     if (sessionInitialized) {
       return;
     }
     
-    try {
-      var screen = {
-        width: window.screen.width || 0,
-        height: window.screen.height || 0
-      };
-      
-      sendRequest(API_BASE + '/api/session/init', {
-        apiKey: apiKey,
-        sessionId: sessionId,
-        url: window.location.href,
-        userAgent: navigator.userAgent || '',
-        screen: screen
-      });
-      
+    var screen = {
+      width: window.screen.width || 0,
+      height: window.screen.height || 0
+    };
+    var viewport = {
+      width: window.innerWidth || 0,
+      height: window.innerHeight || 0
+    };
+    var payload = {
+      apiKey: apiKey,
+      sessionId: sessionId,
+      url: window.location.href,
+      userAgent: navigator.userAgent || '',
+      screen: screen,
+      viewport: viewport
+    };
+    
+    fetch(API_BASE + '/api/session/init', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }).then(function(res) {
+      if (!res.ok) return;
       sessionInitialized = true;
-    } catch (e) {}
+      var raw = document.documentElement.outerHTML;
+      var snapshot = raw.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
+      return fetch(API_BASE + '/api/session/capture', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey: apiKey, sessionId: sessionId, snapshot: snapshot })
+      });
+    }).catch(function() {});
   }
   
   // Add event to queue
