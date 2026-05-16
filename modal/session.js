@@ -55,8 +55,23 @@ const sessionSchema = new mongoose.Schema({
 
   snapshot: {
     type: String
-  }
+  },
+
+  pages: [
+    {
+      url: String,
+      snapshot: { type: String, default: "" },
+      startedAt: Date,
+      viewport: {
+        width: Number,
+        height: Number
+      },
+      eventsCount: { type: Number, default: 0 }
+    }
+  ]
 
 }, { timestamps: true });
+
+sessionSchema.index({ sessionId: 1, "pages.startedAt": 1 });
 
 module.exports = mongoose.model("Session", sessionSchema);

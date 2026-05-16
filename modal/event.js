@@ -23,8 +23,16 @@ const eventSchema = new mongoose.Schema({
     type: Number,
     required: true,
     index: true
+  },
+
+  pageIndex: {
+    type: Number,
+    default: 0,
+    index: true
   }
 
 }, { timestamps: false });
+
+eventSchema.index({ sessionId: 1, pageIndex: 1, timestamp: 1 });
 
 module.exports = mongoose.model("Event", eventSchema);
