@@ -11,6 +11,8 @@ const authRoutes = require('./routes/authRoute');
 const projectRoutes = require('./routes/projectRoute');
 const installationRoutes = require('./routes/installationRoute');
 const sessionRoutes = require('./routes/sessionRoute');
+const trackerRoutes = require('./routes/trackerRoute');
+const goalRoutes = require('./routes/goalRoute');
 
 
 
@@ -25,6 +27,8 @@ app.use("/api/auth", authRoutes);
 app.use("/api/projects", projectRoutes);
 app.use("/api/installation", installationRoutes);
 app.use("/api", sessionRoutes);
+app.use("/api/tracker", trackerRoutes);
+app.use("/api/projects/:id/goals", goalRoutes);
 
 // Serve tracker.js
 app.get("/tracker.js", (req, res) => {

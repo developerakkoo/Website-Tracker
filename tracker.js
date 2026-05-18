@@ -18,6 +18,12 @@
   var MOUSE_MOVE_THROTTLE = 100;
   var MAX_QUEUE_SIZE = 200;
   var BATCH_INTERVAL = 5000;
+  var GOAL_KEY_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/i;
+  var GOAL_DEDUPE_MS = 2000;
+  var MAX_GOAL_CLICKS_PER_SESSION = 50;
+  var configuredGoals = [];
+  var lastGoalClickByKey = {};
+  var goalClickCount = 0;
 
   function sendRequest(url, data, useBeacon) {
     try {
@@ -106,6 +112,7 @@
     lastHref = href;
 
     sendBatchedEvents();
+    fetchGoals();
 
     var viewport = {
       width: window.innerWidth || 0,
@@ -165,10 +172,124 @@
         lastHref = window.location.href;
         currentPageIndex = 0;
         hookHistory();
+        fetchGoals();
         return captureSnapshot();
       })
       .catch(function() {});
   }
+
+  function fetchGoals() {
+    try {
+      fetch(API_BASE + '/api/tracker/goals?apiKey=' + encodeURIComponent(apiKey))
+        .then(function(res) {
+          if (!res.ok) return;
+          return res.json();
+        })
+        .then(function(data) {
+          if (data && Array.isArray(data.goals)) {
+            configuredGoals = data.goals;
+          }
+        })
+        .catch(function() {});
+    } catch (e) {}
+  }
+
+  function urlMatchesPattern(url, pattern) {
+    if (!pattern || !String(pattern).trim()) return true;
+    var p = String(pattern).trim();
+    try {
+      var u = new URL(url || '');
+      var path = u.pathname + u.search;
+      if (p.indexOf('http://') === 0 || p.indexOf('https://') === 0) {
+        return url.indexOf(p) !== -1;
+      }
+      return path.indexOf(p) === 0 || path.indexOf(p) !== -1;
+    } catch (err) {
+      return (url || '').indexOf(p) !== -1;
+    }
+  }
+
+  function isValidGoalKey(key) {
+    return typeof key === 'string' && GOAL_KEY_RE.test(key);
+  }
+
+  function truncateText(text, max) {
+    if (!text || typeof text !== 'string') return '';
+    return text.length > max ? text.slice(0, max) : text;
+  }
+
+  function recordGoalClick(goalKey, goalName, el) {
+    if (!isValidGoalKey(goalKey)) return;
+    if (goalClickCount >= MAX_GOAL_CLICKS_PER_SESSION) return;
+
+    var now = Date.now();
+    var last = lastGoalClickByKey[goalKey] || 0;
+    if (now - last < GOAL_DEDUPE_MS) return;
+    lastGoalClickByKey[goalKey] = now;
+    goalClickCount++;
+
+    var tag = '';
+    var text = '';
+    try {
+      if (el && el.tagName) tag = el.tagName;
+      if (el && el.innerText) text = truncateText(el.innerText, 120);
+    } catch (e) {}
+
+    addEvent('goal_click', {
+      goalKey: goalKey.toLowerCase(),
+      goalName: goalName || '',
+      pageUrl: window.location.href,
+      elementTag: tag,
+      elementText: text
+    });
+  }
+
+  function trackGoalFromElement(el) {
+    if (!el) return false;
+    var attrEl = el.closest ? el.closest('[data-wt-goal]') : null;
+    if (attrEl) {
+      var key = attrEl.getAttribute('data-wt-goal');
+      var label = attrEl.getAttribute('data-wt-goal-label') || '';
+      recordGoalClick(key, label, attrEl);
+      return true;
+    }
+    return false;
+  }
+
+  function trackGoalFromSelectors(target) {
+    if (!configuredGoals.length || !target) return false;
+    var href = '';
+    try {
+      href = window.location.href;
+    } catch (e) {
+      return false;
+    }
+
+    for (var i = 0; i < configuredGoals.length; i++) {
+      var g = configuredGoals[i];
+      if (!g || !g.selector || !g.key) continue;
+      if (!urlMatchesPattern(href, g.urlPattern)) continue;
+      try {
+        if (target.matches && target.matches(g.selector)) {
+          recordGoalClick(g.key, g.name || '', target);
+          return true;
+        }
+        if (target.closest && target.closest(g.selector)) {
+          recordGoalClick(g.key, g.name || '', target.closest(g.selector));
+          return true;
+        }
+      } catch (selErr) {}
+    }
+    return false;
+  }
+
+  function trackGoal(key, meta) {
+    if (!isValidGoalKey(key)) return;
+    var m = meta || {};
+    recordGoalClick(key, m.goalName || m.label || '', null);
+  }
+
+  window.__trackerTrackGoal = trackGoal;
 
   function addEvent(type, data) {
     try {
@@ -223,7 +344,11 @@
         x: e.clientX || 0,
         y: e.clientY || 0
       });
-    } catch (e) {}
+      var target = e.target;
+      if (!trackGoalFromElement(target)) {
+        trackGoalFromSelectors(target);
+      }
+    } catch (err) {}
   }
 
   function handleScroll() {

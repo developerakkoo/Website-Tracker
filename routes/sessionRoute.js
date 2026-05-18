@@ -4,6 +4,7 @@ const Project = require("../modal/project");
 const Event = require("../modal/event");
 const authMiddleware = require("../middleware/authMiddleware");
 const heatmapAggregator = require("../utils/heatmapAggregator");
+const goalClickAggregator = require("../utils/goalClickAggregator");
 
 const router = express.Router();
 
@@ -152,6 +153,9 @@ router.get("/session/:sessionId/full", authMiddleware, async (req, res) => {
   if (!session) {
     return res.status(404).json({ message: "Session not found" });
   }
+  if (!session.eventCount || session.eventCount <= 0) {
+    return res.status(404).json({ message: "This visit has no recording to play" });
+  }
 
   const allEvents = await Event.find({ sessionId: session._id }).sort({ timestamp: 1 }).lean();
   const mapEv = (e) => ({
@@ -203,6 +207,9 @@ router.get("/session/:sessionId/events", authMiddleware, async (req, res) => {
   const session = await getSessionForUser(req.params.sessionId, req.user.id);
   if (!session) {
     return res.status(404).json({ message: "Session not found" });
+  }
+  if (!session.eventCount || session.eventCount <= 0) {
+    return res.status(404).json({ message: "This visit has no recording to play" });
   }
   const events = await Event.find({ sessionId: session._id }).sort({ timestamp: 1 });
   return res.json(
@@ -298,6 +305,12 @@ router.post("/session/events", async (req, res) => {
     session.viewport,
     events
   );
+
+  const goalEvents = events.filter((e) => e.type === "goal_click" && e.data?.goalKey);
+  if (goalEvents.length > 0) {
+    const enabledKeys = await goalClickAggregator.loadEnabledGoalKeys(project._id);
+    goalClickAggregator.addGoalClicks(project._id, session._id, goalEvents, enabledKeys);
+  }
 
   res.json({ success: true });
 });
