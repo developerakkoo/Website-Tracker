@@ -21,7 +21,7 @@ const app = express();
 app.use(cors());
 app.use(bodyParser.json());
 
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 app.use("/api/auth", authRoutes);
 app.use("/api/projects", projectRoutes);
@@ -36,7 +36,6 @@ app.get("/tracker.js", (req, res) => {
   res.sendFile(__dirname + "/tracker.js");
 });
 
-app.listen(PORT, () =>{
-    console.log("Watching on 3000...");
-    
+app.listen(PORT, () => {
+  console.log(`API listening on port ${PORT}`);
 });
