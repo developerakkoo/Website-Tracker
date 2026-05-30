@@ -7,8 +7,9 @@
     return;
   }
 
-  var sessionId = crypto.randomUUID();
+  var SESSION_TTL_MS = 30 * 60 * 1000;
   var sessionInitialized = false;
+  var initRetried = false;
   var currentPageIndex = 0;
   var lastHref = '';
   var historyHooked = false;
@@ -24,6 +25,52 @@
   var configuredGoals = [];
   var lastGoalClickByKey = {};
   var goalClickCount = 0;
+
+  function storageKeys() {
+    var prefix = 'wt_' + String(apiKey).slice(0, 16).replace(/[^a-zA-Z0-9]/g, '');
+    return { sid: prefix + '_sid', exp: prefix + '_exp' };
+  }
+
+  function touchSessionExpiry() {
+    try {
+      var keys = storageKeys();
+      sessionStorage.setItem(keys.exp, String(Date.now() + SESSION_TTL_MS));
+    } catch (e) {}
+  }
+
+  function loadPersistedSessionId() {
+    try {
+      var keys = storageKeys();
+      var sid = sessionStorage.getItem(keys.sid);
+      var exp = parseInt(sessionStorage.getItem(keys.exp) || '0', 10);
+      if (sid && exp && Date.now() < exp) {
+        return sid;
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function persistSession(id) {
+    try {
+      var keys = storageKeys();
+      sessionStorage.setItem(keys.sid, id);
+      sessionStorage.setItem(keys.exp, String(Date.now() + SESSION_TTL_MS));
+    } catch (e) {}
+  }
+
+  function clearPersistedSession() {
+    try {
+      var keys = storageKeys();
+      sessionStorage.removeItem(keys.sid);
+      sessionStorage.removeItem(keys.exp);
+    } catch (e) {}
+  }
+
+  var sessionId = loadPersistedSessionId();
+  if (!sessionId) {
+    sessionId = crypto.randomUUID();
+    persistSession(sessionId);
+  }
 
   function sendRequest(url, data, useBeacon) {
     try {
@@ -55,18 +102,43 @@
     } catch (e) {}
   }
 
-  function captureSnapshot() {
+  function buildSnapshotHtml() {
     try {
+      if (typeof window.__wtBuildSnapshot === 'function') {
+        return window.__wtBuildSnapshot();
+      }
       var raw = document.documentElement.outerHTML;
-      var snapshot = raw.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
-      return fetch(API_BASE + '/api/session/capture', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey: apiKey, sessionId: sessionId, snapshot: snapshot })
-      });
+      return raw.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '');
     } catch (e) {
-      return Promise.resolve();
+      return '';
     }
+  }
+
+  function scheduleCaptureSnapshot() {
+    var run = function() {
+      try {
+        var snapshot = buildSnapshotHtml();
+        if (!snapshot) return;
+        fetch(API_BASE + '/api/session/capture', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ apiKey: apiKey, sessionId: sessionId, snapshot: snapshot })
+        }).catch(function() {});
+      } catch (e) {}
+    };
+
+    if (document.readyState === 'complete') {
+      setTimeout(run, 300);
+    } else {
+      window.addEventListener('load', function() {
+        setTimeout(run, 300);
+      }, { once: true });
+    }
+  }
+
+  function captureSnapshot() {
+    scheduleCaptureSnapshot();
+    return Promise.resolve();
   }
 
   function hookHistory() {
@@ -113,6 +185,7 @@
 
     sendBatchedEvents();
     fetchGoals();
+    touchSessionExpiry();
 
     var viewport = {
       width: window.innerWidth || 0,
@@ -131,12 +204,41 @@
       })
     })
       .then(function(res) {
-        if (!res.ok) return;
-        currentPageIndex++;
+        return res.json().then(function(data) {
+          return { ok: res.ok, data: data };
+        });
+      })
+      .then(function(result) {
+        if (!result.ok) return;
+        if (typeof result.data.pageIndex === 'number') {
+          currentPageIndex = result.data.pageIndex;
+        } else {
+          currentPageIndex++;
+        }
         addEvent('navigation', { url: href });
         return captureSnapshot();
       })
       .catch(function() {});
+  }
+
+  function handleInitSuccess(data) {
+    sessionInitialized = true;
+    touchSessionExpiry();
+    persistSession(sessionId);
+    lastHref = window.location.href;
+
+    if (data && data.resumed) {
+      currentPageIndex = typeof data.pageIndex === 'number' ? data.pageIndex : 0;
+      if (data.newPage) {
+        addEvent('navigation', { url: lastHref });
+      }
+    } else {
+      currentPageIndex = typeof data.pageIndex === 'number' ? data.pageIndex : 0;
+    }
+
+    hookHistory();
+    fetchGoals();
+    captureSnapshot();
   }
 
   function initSession() {
@@ -167,13 +269,22 @@
       body: JSON.stringify(payload)
     })
       .then(function(res) {
-        if (!res.ok) return;
-        sessionInitialized = true;
-        lastHref = window.location.href;
-        currentPageIndex = 0;
-        hookHistory();
-        fetchGoals();
-        return captureSnapshot();
+        return res.json().then(function(data) {
+          return { ok: res.ok, status: res.status, data: data };
+        });
+      })
+      .then(function(result) {
+        if (result.status === 410 && result.data && result.data.expired && !initRetried) {
+          clearPersistedSession();
+          sessionId = crypto.randomUUID();
+          persistSession(sessionId);
+          initRetried = true;
+          sessionInitialized = false;
+          initSession();
+          return;
+        }
+        if (!result.ok) return;
+        handleInitSuccess(result.data);
       })
       .catch(function() {});
   }
@@ -312,6 +423,7 @@
     try {
       var eventsToSend = eventQueue.slice();
       eventQueue = [];
+      touchSessionExpiry();
       sendRequest(API_BASE + '/api/session/events', {
         apiKey: apiKey,
         sessionId: sessionId,
@@ -326,6 +438,7 @@
     }
     try {
       var eventsToSend = eventQueue.slice();
+      eventQueue = [];
       sendRequest(
         API_BASE + '/api/session/events',
         {
@@ -373,6 +486,16 @@
     } catch (e) {}
   }
 
+  function handlePageHide() {
+    flushEvents();
+  }
+
+  function handleVisibilityChange() {
+    if (document.visibilityState === 'hidden') {
+      flushEvents();
+    }
+  }
+
   function initialize() {
     try {
       sendInstallationPing();
@@ -381,6 +504,8 @@
       window.addEventListener('scroll', handleScroll, true);
       document.addEventListener('mousemove', handleMouseMove, true);
       window.addEventListener('beforeunload', flushEvents);
+      window.addEventListener('pagehide', handlePageHide);
+      document.addEventListener('visibilitychange', handleVisibilityChange);
       batchInterval = setInterval(sendBatchedEvents, BATCH_INTERVAL);
     } catch (e) {}
   }

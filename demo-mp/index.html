@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Demo MP — Home</title>
+  <link rel="stylesheet" href="/demo-mp/styles.css">
+  <!-- Set YOUR_PROJECT_API_KEY from dashboard -->
+  <script>
+  (function(w,d,s,u,k,b){
+    w.__trackerKey = k;
+    w.__trackerBase = b;
+    var js = d.createElement(s);
+    js.async = true;
+    js.src = u;
+    var f = d.getElementsByTagName(s)[0];
+    f.parentNode.insertBefore(js,f);
+  })(window, document, "script",
+     "http://localhost:3000/tracker.js",
+     "YOUR_PROJECT_API_KEY",
+     "http://localhost:3000");
+  </script>
+</head>
+<body>
+  <nav>
+    <a href="/demo-mp/">Home</a>
+    <a href="/demo-mp/about.html">About</a>
+    <a href="/demo-mp/contact.html">Contact</a>
+    <a href="/demo-mp/pricing.html">Pricing</a>
+  </nav>
+  <main>
+    <h1>Multi-page demo — Home</h1>
+    <p>Navigate using the links above. Each page is a full reload; the tracker should keep one session.</p>
+    <a class="cta" href="/demo-mp/about.html">Go to About</a>
+  </main>
+</body>
+</html>

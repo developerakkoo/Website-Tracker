@@ -1,14 +1,49 @@
 const express = require("express");
+const zlib = require("zlib");
+const { promisify } = require("util");
 const Session = require("../modal/session");
 const Project = require("../modal/project");
 const Event = require("../modal/event");
 const authMiddleware = require("../middleware/authMiddleware");
 const heatmapAggregator = require("../utils/heatmapAggregator");
 const goalClickAggregator = require("../utils/goalClickAggregator");
+const { normalizeSnapshot } = require("../utils/snapshotSanitizer");
+const { mirrorAsset, getMirroredAsset } = require("../utils/assetMirror");
 
 const router = express.Router();
 
-const MAX_SNAPSHOT_BYTES = 2 * 1024 * 1024;
+const gunzip = promisify(zlib.gunzip);
+
+const SESSION_TTL_MS = 30 * 60 * 1000;
+const RRWEB_FULL_SNAPSHOT_TYPE = 2;
+
+async function decodeGzipJsonBody(body) {
+  const compressed = Buffer.from(body, "base64");
+  const decompressed = await gunzip(compressed);
+  return JSON.parse(decompressed.toString("utf8"));
+}
+
+async function extractSnapshotFromCaptureBody(body) {
+  const { snapshot, body: encodedBody, encoding } = body;
+  if (encoding === "gzip" && encodedBody) {
+    const parsed = await decodeGzipJsonBody(encodedBody);
+    return typeof parsed === "string" ? parsed : parsed.snapshot || "";
+  }
+  return snapshot || "";
+}
+
+function chunkHasFullSnapshot(eventsArray) {
+  return eventsArray.some((ev) => ev && ev.type === RRWEB_FULL_SNAPSHOT_TYPE);
+}
+
+function deriveRrwebStatus(existingStatus, eventsArray, isCheckout) {
+  if (chunkHasFullSnapshot(eventsArray)) {
+    return isCheckout ? "complete" : "partial";
+  }
+  if (isCheckout && existingStatus !== "none") return "complete";
+  if (existingStatus === "none" && eventsArray.length > 0) return "partial";
+  return existingStatus || "none";
+}
 
 function deriveDeviceType(userAgent) {
   if (!userAgent || typeof userAgent !== "string") return "desktop";
@@ -19,10 +54,36 @@ function deriveDeviceType(userAgent) {
   return "desktop";
 }
 
-function normalizeSnapshot(snapshot) {
-  let s = snapshot || "";
-  if (s.length > MAX_SNAPSHOT_BYTES) s = s.slice(0, MAX_SNAPSHOT_BYTES);
-  return s;
+function isSessionExpired(session) {
+  const lastAct = session.lastActivity || session.startedAt;
+  if (!lastAct) return false;
+  return Date.now() - new Date(lastAct).getTime() > SESSION_TTL_MS;
+}
+
+async function appendPageToSession(session, url, viewport) {
+  const vp =
+    viewport && typeof viewport.width === "number" && typeof viewport.height === "number"
+      ? viewport
+      : session.viewport;
+  const startedAt = new Date();
+
+  await Session.findByIdAndUpdate(session._id, {
+    $push: {
+      pages: {
+        url,
+        snapshot: "",
+        startedAt,
+        viewport: vp,
+        eventsCount: 0,
+        baseUrl: url
+      }
+    },
+    $set: { url, lastActivity: new Date(), viewport: vp || session.viewport }
+  });
+
+  const updated = await Session.findById(session._id).lean();
+  const pageIndex = Math.max(0, (updated.pages?.length || 1) - 1);
+  return pageIndex;
 }
 
 // Initialize Session (POST /api/session/init)
@@ -40,7 +101,47 @@ router.post("/session/init", async (req, res) => {
 
   const existing = await Session.findOne({ sessionId });
   if (existing) {
-    return res.json({ message: "Session already exists" });
+    if (existing.projectId.toString() !== project._id.toString()) {
+      return res.status(403).json({ message: "Invalid session for project" });
+    }
+    if (isSessionExpired(existing)) {
+      return res.status(410).json({ expired: true, message: "Session expired" });
+    }
+
+    const pages = existing.pages || [];
+    const lastPage = pages.length > 0 ? pages[pages.length - 1] : null;
+    if (lastPage && lastPage.url === url) {
+      await Session.findByIdAndUpdate(existing._id, {
+        $set: { url, lastActivity: new Date() }
+      });
+      return res.json({
+        success: true,
+        resumed: true,
+        pageIndex: pages.length - 1,
+        newPage: false,
+        sessionId
+      });
+    }
+
+    const pageIndex = await appendPageToSession(existing, url, viewport);
+    return res.json({
+      success: true,
+      resumed: true,
+      pageIndex,
+      newPage: true,
+      sessionId
+    });
+  }
+
+  const todayStart = new Date();
+  todayStart.setHours(0, 0, 0, 0);
+  const todayCount = await Session.countDocuments({
+    projectId: project._id,
+    startedAt: { $gte: todayStart }
+  });
+  const DAILY_QUOTA = project.dailySessionQuota || 10000;
+  if (todayCount >= DAILY_QUOTA) {
+    return res.status(429).json({ error: "quota_exceeded", limit: DAILY_QUOTA });
   }
 
   const deviceType = deriveDeviceType(userAgent);
@@ -67,12 +168,19 @@ router.post("/session/init", async (req, res) => {
         snapshot: "",
         startedAt,
         viewport: vp,
-        eventsCount: 0
+        eventsCount: 0,
+        baseUrl: url || ""
       }
     ]
   });
 
-  res.json({ success: true });
+  res.json({
+    success: true,
+    resumed: false,
+    pageIndex: 0,
+    newPage: true,
+    sessionId
+  });
 });
 
 // New page in session (SPA / navigation) — POST /api/session/page
@@ -85,6 +193,9 @@ router.post("/session/page", async (req, res) => {
   if (!project) return res.status(403).json({ message: "Invalid API key" });
   const session = await Session.findOne({ sessionId });
   if (!session) return res.status(404).json({ message: "Session not found" });
+  if (isSessionExpired(session)) {
+    return res.status(410).json({ expired: true, message: "Session expired" });
+  }
 
   const vp =
     viewport && typeof viewport.width === "number" && typeof viewport.height === "number"
@@ -99,45 +210,135 @@ router.post("/session/page", async (req, res) => {
         snapshot: "",
         startedAt,
         viewport: vp,
-        eventsCount: 0
+        eventsCount: 0,
+        baseUrl: url
       }
     },
     $set: { url, lastActivity: new Date(), viewport: vp || session.viewport }
   });
 
-  res.json({ success: true });
+  const updated = await Session.findById(session._id).lean();
+  const pageIndex = Math.max(0, (updated.pages?.length || 1) - 1);
+  res.json({ success: true, pageIndex });
+});
+
+// Mirror remote asset for replay — POST /api/session/mirror-asset
+router.post("/session/mirror-asset", async (req, res) => {
+  try {
+    const { apiKey, sessionId, url } = req.body;
+    if (!apiKey || !sessionId || !url) {
+      return res.status(400).json({ ok: false, code: "missing_fields" });
+    }
+    const project = await Project.findOne({ apiKey });
+    if (!project) return res.status(403).json({ ok: false, code: "invalid_key" });
+    const session = await Session.findOne({ sessionId, projectId: project._id });
+    if (!session) return res.status(404).json({ ok: false, code: "session_not_found" });
+
+    const result = await mirrorAsset(String(url));
+    const mirrorUrl = `/api/mirror/${result.hash}`;
+    return res.json({ ok: true, hash: result.hash, mirrorUrl, cached: result.cached });
+  } catch (err) {
+    console.error("mirror-asset error:", err.message);
+    return res.status(422).json({ ok: false, code: "mirror_failed", message: err.message });
+  }
+});
+
+// Serve mirrored asset — GET /api/mirror/:hash
+router.get("/mirror/:hash", (req, res) => {
+  const asset = getMirroredAsset(req.params.hash);
+  if (!asset) return res.status(404).send("Not found");
+  res.setHeader("Content-Type", asset.contentType);
+  res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+  return res.send(asset.buffer);
 });
 
 // Save snapshot — POST /api/session/capture (latest page + legacy snapshot field)
 router.post("/session/capture", async (req, res) => {
-  const { apiKey, sessionId, snapshot } = req.body;
-  if (!apiKey || !sessionId) {
-    return res.status(400).json({ message: "Missing required fields" });
-  }
-  const project = await Project.findOne({ apiKey });
-  if (!project) {
-    return res.status(403).json({ message: "Invalid API key" });
-  }
-  const session = await Session.findOne({ sessionId });
-  if (!session) {
-    return res.status(404).json({ message: "Session not found" });
-  }
-  const snap = normalizeSnapshot(snapshot);
-  const so = session.toObject();
-  let pages = Array.isArray(so.pages) ? so.pages.map((p) => ({ ...p })) : [];
-  if (pages.length === 0) {
-    pages.push({
-      url: session.url || "",
-      snapshot: snap,
-      startedAt: session.startedAt,
-      viewport: session.viewport,
-      eventsCount: 0
+  try {
+    const { apiKey, sessionId } = req.body;
+    if (!apiKey || !sessionId) {
+      return res.status(400).json({ ok: false, code: "missing_fields", message: "Missing required fields" });
+    }
+    const project = await Project.findOne({ apiKey });
+    if (!project) {
+      return res.status(403).json({ ok: false, code: "invalid_key", message: "Invalid API key" });
+    }
+    const session = await Session.findOne({ sessionId });
+    if (!session) {
+      return res.status(404).json({ ok: false, code: "session_not_found", message: "Session not found" });
+    }
+
+    let rawSnapshot;
+    try {
+      rawSnapshot = await extractSnapshotFromCaptureBody(req.body);
+    } catch (decodeErr) {
+      console.error("Capture decode error:", decodeErr.message);
+      return res.status(400).json({ ok: false, code: "decode_error", message: "Could not decode snapshot payload" });
+    }
+
+    const rawBytes = Buffer.byteLength(rawSnapshot || "", "utf8");
+    if (!rawSnapshot || rawBytes === 0) {
+      return res.status(400).json({ ok: false, code: "empty_snapshot", message: "Snapshot is empty" });
+    }
+
+    const snapBeforeNorm = rawSnapshot;
+    const snap = normalizeSnapshot(rawSnapshot);
+    const truncated = snap.length < snapBeforeNorm.length;
+    const snapBytes = Buffer.byteLength(snap, "utf8");
+    const capturedAt = new Date();
+
+    const so = session.toObject();
+    let pages = Array.isArray(so.pages) ? so.pages.map((p) => ({ ...p })) : [];
+    if (pages.length === 0) {
+      pages.push({
+        url: session.url || "",
+        snapshot: snap,
+        startedAt: session.startedAt,
+        viewport: session.viewport,
+        eventsCount: 0,
+        snapshotBytes: snapBytes,
+        snapshotCapturedAt: capturedAt
+      });
+    } else {
+      const lastIdx = pages.length - 1;
+      const existing = pages[lastIdx];
+      const existingBytes = existing.snapshotBytes || (existing.snapshot ? existing.snapshot.length : 0);
+      if (snapBytes >= existingBytes || !existing.snapshot) {
+        pages[lastIdx] = {
+          ...existing,
+          snapshot: snap,
+          snapshotBytes: snapBytes,
+          snapshotCapturedAt: capturedAt
+        };
+      } else {
+        return res.json({
+          ok: true,
+          skipped: true,
+          reason: "existing_snapshot_larger",
+          bytes: existingBytes
+        });
+      }
+    }
+
+    await Session.findByIdAndUpdate(session._id, { $set: { snapshot: snap, pages } });
+
+    console.info(
+      `[capture] session=${sessionId} bytes=${snapBytes} truncated=${truncated} pages=${pages.length}`
+    );
+
+    return res.json({
+      ok: true,
+      success: true,
+      bytes: snapBytes,
+      truncated
     });
-  } else {
-    pages[pages.length - 1] = { ...pages[pages.length - 1], snapshot: snap };
+  } catch (err) {
+    if (err.type === "entity.too.large") {
+      return res.status(413).json({ ok: false, code: "payload_too_large", message: "Snapshot payload too large" });
+    }
+    console.error("Capture error:", err);
+    return res.status(500).json({ ok: false, code: "server_error", message: "Internal server error" });
   }
-  await Session.findByIdAndUpdate(session._id, { $set: { snapshot: snap, pages } });
-  return res.json({ success: true });
 });
 
 async function getSessionForUser(sessionIdStr, userId) {
@@ -157,7 +358,12 @@ router.get("/session/:sessionId/full", authMiddleware, async (req, res) => {
     return res.status(404).json({ message: "This visit has no recording to play" });
   }
 
-  const allEvents = await Event.find({ sessionId: session._id }).sort({ timestamp: 1 }).lean();
+  const allEvents = await Event.find({
+    sessionId: session._id,
+    type: { $nin: ["rrweb_chunk", "note"] }
+  })
+    .sort({ timestamp: 1 })
+    .lean();
   const mapEv = (e) => ({
     type: e.type,
     data: e.data,
@@ -211,7 +417,10 @@ router.get("/session/:sessionId/events", authMiddleware, async (req, res) => {
   if (!session.eventCount || session.eventCount <= 0) {
     return res.status(404).json({ message: "This visit has no recording to play" });
   }
-  const events = await Event.find({ sessionId: session._id }).sort({ timestamp: 1 });
+  const events = await Event.find({
+    sessionId: session._id,
+    type: { $nin: ["rrweb_chunk", "note"] }
+  }).sort({ timestamp: 1 });
   return res.json(
     events.map((e) => ({
       type: e.type,
@@ -237,7 +446,16 @@ router.get("/session/:sessionId", authMiddleware, async (req, res) => {
     userAgent: session.userAgent,
     viewport: session.viewport,
     deviceType: session.deviceType,
-    pages: session.pages || []
+    pages: session.pages || [],
+    hasRrweb: !!session.hasRrweb,
+    rrwebStatus: session.rrwebStatus || "none",
+    rrwebChunkCount: session.rrwebChunkCount || 0,
+    rageClickCount: session.rageClickCount || 0,
+    deadClickCount: session.deadClickCount || 0,
+    errorCount: session.errorCount || 0,
+    networkErrorCount: session.networkErrorCount || 0,
+    starred: !!session.starred,
+    tags: session.tags || []
   });
 });
 
@@ -281,7 +499,24 @@ router.post("/session/events", async (req, res) => {
 
   await Event.insertMany(formattedEvents);
 
-  const incUpdate = { eventCount: events.length };
+  let rageInc = 0;
+  let deadInc = 0;
+  let errorInc = 0;
+  let networkErrorInc = 0;
+  events.forEach((event) => {
+    if (event.type === "rage_click") rageInc++;
+    if (event.type === "dead_click") deadInc++;
+    if (event.type === "console" && event.data?.level === "error") errorInc++;
+    if (event.type === "network" && event.data?.error) networkErrorInc++;
+  });
+
+  const incUpdate = {
+    eventCount: events.length,
+    rageClickCount: rageInc,
+    deadClickCount: deadInc,
+    errorCount: errorInc,
+    networkErrorCount: networkErrorInc
+  };
   if (hasPages) {
     const pageIncs = {};
     formattedEvents.forEach((fe) => {
@@ -303,7 +538,7 @@ router.post("/session/events", async (req, res) => {
     session.url || "",
     session.deviceType,
     session.viewport,
-    events
+    events.filter((e) => e.type === "click" || e.type === "scroll" || e.type === "mousemove")
   );
 
   const goalEvents = events.filter((e) => e.type === "goal_click" && e.data?.goalKey);
@@ -313,6 +548,143 @@ router.post("/session/events", async (req, res) => {
   }
 
   res.json({ success: true });
+});
+
+// POST /api/session/rrweb-chunk — rrweb event chunks from upgraded tracker
+router.post("/session/rrweb-chunk", async (req, res) => {
+  try {
+    const { apiKey, sessionId, chunkIndex, isCheckout, recordedAt, events, body, encoding } = req.body;
+    if (!apiKey || !sessionId) {
+      return res.status(400).json({ error: "missing fields" });
+    }
+
+    const project = await Project.findOne({ apiKey });
+    if (!project) return res.status(401).json({ error: "invalid key" });
+
+    const session = await Session.findOne({ sessionId, projectId: project._id });
+    if (!session) return res.status(404).json({ error: "session not found" });
+
+    let eventsArray;
+    if (encoding === "gzip" && body) {
+      const compressed = Buffer.from(body, "base64");
+      const decompressed = await gunzip(compressed);
+      const parsed = JSON.parse(decompressed.toString("utf8"));
+      eventsArray = parsed.events || parsed;
+    } else if (Array.isArray(events)) {
+      eventsArray = events;
+    } else if (body && encoding === "identity") {
+      const parsed = typeof body === "string" ? JSON.parse(body) : body;
+      eventsArray = parsed.events || parsed;
+    } else {
+      eventsArray = [];
+    }
+
+    if (!Array.isArray(eventsArray)) {
+      return res.status(400).json({ error: "invalid events" });
+    }
+
+    const chunkDoc = {
+      sessionId: session._id,
+      type: "rrweb_chunk",
+      data: {
+        chunkIndex: chunkIndex || 0,
+        isCheckout: !!isCheckout,
+        events: eventsArray
+      },
+      timestamp: recordedAt || Date.now(),
+      pageIndex: 0
+    };
+
+    await Event.create(chunkDoc);
+
+    const rrwebStatus = deriveRrwebStatus(session.rrwebStatus, eventsArray, !!isCheckout);
+    if (chunkIndex === 1 && !chunkHasFullSnapshot(eventsArray)) {
+      console.warn(`[rrweb-chunk] session=${sessionId} first chunk missing full snapshot event`);
+    }
+
+    await Session.updateOne(
+      { _id: session._id },
+      {
+        $inc: { eventCount: eventsArray.length, rrwebChunkCount: 1 },
+        $set: {
+          lastActivity: new Date(),
+          hasRrweb: true,
+          rrwebStatus,
+          duration: Date.now() - session.startedAt.getTime()
+        }
+      }
+    );
+
+    return res.status(202).json({ ok: true });
+  } catch (err) {
+    console.error("rrweb-chunk error:", err);
+    return res.status(500).json({ error: "server error" });
+  }
+});
+
+// GET /api/session/:sessionId/rrweb-chunks — ordered rrweb chunks for replayer
+router.get("/session/:sessionId/rrweb-chunks", authMiddleware, async (req, res) => {
+  try {
+    const session = await getSessionForUser(req.params.sessionId, req.user.id);
+    if (!session) return res.status(404).json({ error: "not found" });
+    if (!session.hasRrweb && (!session.rrwebChunkCount || session.rrwebChunkCount === 0)) {
+      return res.status(404).json({ error: "no rrweb recording" });
+    }
+
+    const chunks = await Event.find(
+      { sessionId: session._id, type: "rrweb_chunk" },
+      { "data.chunkIndex": 1, "data.events": 1, "data.isCheckout": 1, timestamp: 1 }
+    )
+      .sort({ "data.chunkIndex": 1 })
+      .lean();
+
+    return res.json({
+      sessionId: session.sessionId,
+      chunkCount: chunks.length,
+      chunks: chunks.map((c) => ({
+        chunkIndex: c.data.chunkIndex,
+        isCheckout: c.data.isCheckout,
+        recordedAt: c.timestamp,
+        events: c.data.events
+      }))
+    });
+  } catch (err) {
+    console.error("rrweb-chunks error:", err);
+    return res.status(500).json({ error: "server error" });
+  }
+});
+
+// PATCH /api/session/:sessionId/annotate — star, tag, note
+router.patch("/session/:sessionId/annotate", authMiddleware, async (req, res) => {
+  try {
+    const { starred, addTag, removeTag, note } = req.body;
+    const session = await getSessionForUser(req.params.sessionId, req.user.id);
+    if (!session) return res.status(404).json({ error: "not found" });
+
+    if (typeof starred === "boolean") {
+      await Session.updateOne({ _id: session._id }, { $set: { starred } });
+    }
+    if (addTag) {
+      await Session.updateOne({ _id: session._id }, { $addToSet: { tags: String(addTag).slice(0, 64) } });
+    }
+    if (removeTag) {
+      await Session.updateOne({ _id: session._id }, { $pull: { tags: removeTag } });
+    }
+    if (note) {
+      await Event.create({
+        sessionId: session._id,
+        type: "note",
+        data: { text: String(note).slice(0, 500), author: req.user.id },
+        timestamp: Date.now(),
+        pageIndex: 0
+      });
+    }
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("annotate error:", err);
+    return res.status(500).json({ error: "server error" });
+  }
 });
 
 module.exports = router;

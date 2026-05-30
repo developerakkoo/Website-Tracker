@@ -57,6 +57,20 @@ const sessionSchema = new mongoose.Schema({
     type: String
   },
 
+  hasRrweb: { type: Boolean, default: false },
+  rrwebChunkCount: { type: Number, default: 0 },
+  rrwebStatus: {
+    type: String,
+    enum: ["none", "partial", "complete"],
+    default: "none"
+  },
+  rageClickCount: { type: Number, default: 0 },
+  deadClickCount: { type: Number, default: 0 },
+  errorCount: { type: Number, default: 0 },
+  networkErrorCount: { type: Number, default: 0 },
+  starred: { type: Boolean, default: false },
+  tags: { type: [String], default: [] },
+
   pages: [
     {
       url: String,
@@ -66,12 +80,16 @@ const sessionSchema = new mongoose.Schema({
         width: Number,
         height: Number
       },
-      eventsCount: { type: Number, default: 0 }
+      eventsCount: { type: Number, default: 0 },
+      baseUrl: String,
+      snapshotBytes: { type: Number, default: 0 },
+      snapshotCapturedAt: Date
     }
   ]
 
 }, { timestamps: true });
 
 sessionSchema.index({ sessionId: 1, "pages.startedAt": 1 });
+sessionSchema.index({ startedAt: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 90 });
 
 module.exports = mongoose.model("Session", sessionSchema);

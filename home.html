@@ -21,8 +21,18 @@
     .pricing p { margin: 0 0 1rem; }
     footer { padding: 1.5rem; text-align: center; font-size: 0.875rem; color: #666; border-top: 1px solid #eee; }
     footer a { color: #1a6b3a; }
+    .dev-banner {
+      background: #fef3c7;
+      border-bottom: 1px solid #f59e0b;
+      color: #92400e;
+      padding: 0.75rem 1rem;
+      font-size: 0.875rem;
+      text-align: center;
+    }
+    .dev-banner code { background: rgba(0,0,0,0.06); padding: 0.1rem 0.35rem; border-radius: 4px; }
   </style>
- <script>
+  <!-- Replace YOUR_PROJECT_API_KEY with the proj_… key from the dashboard (Project details → Tracking ID) -->
+  <script>
   (function(w,d,s,u,k,b){
     w.__trackerKey = k;
     w.__trackerBase = b;
@@ -31,13 +41,17 @@
     js.src = u;
     var f = d.getElementsByTagName(s)[0];
     f.parentNode.insertBefore(js,f);
-  })(window, document, "script", 
-     "http://localhost:3000/tracker.js", 
-     "f8111ed0388b80f7a3d38d980baff78b48382c27e2c9b71622000be47ede0873",
+  })(window, document, "script",
+     "http://localhost:3000/tracker.js",
+     "YOUR_PROJECT_API_KEY",
      "http://localhost:3000");
   </script>
 </head>
 <body>
+  <div class="dev-banner">
+    Local tracker demo — set <code>YOUR_PROJECT_API_KEY</code> in this file to your project's <code>proj_…</code> key from
+    <a href="http://localhost:4200">localhost:4200</a>.
+  </div>
   <header>
     <h1>Master the Stock Market</h1>
     <p>Learn to trade with confidence. Our course gives you expert-led lessons, real-world strategies, and lifetime access so you can build lasting wealth.</p>

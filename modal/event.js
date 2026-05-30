@@ -29,10 +29,16 @@ const eventSchema = new mongoose.Schema({
     type: Number,
     default: 0,
     index: true
+  },
+
+  createdAt: {
+    type: Date,
+    default: Date.now
   }
 
 }, { timestamps: false });
 
 eventSchema.index({ sessionId: 1, pageIndex: 1, timestamp: 1 });
+eventSchema.index({ createdAt: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 90 });
 
 module.exports = mongoose.model("Event", eventSchema);

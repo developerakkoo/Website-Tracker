@@ -4,8 +4,13 @@
   "description": "",
   "main": "index.js",
   "scripts": {
+    "build:tracker": "esbuild tracker-entry.js --bundle --outfile=public/tracker.bundle.js --platform=browser --target=chrome80 --minify --format=iife",
+    "prestart": "npm run build:tracker",
     "start": "node index.js",
-    "dev": "nodemon index.js"
+    "predev": "npm run build:tracker",
+    "dev": "nodemon index.js",
+    "test:session": "node scripts/test-session-continuity.js",
+    "test:replay": "node scripts/test-replay-e2e.js"
   },
   "author": "",
   "license": "ISC",
@@ -18,6 +23,12 @@
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.2.1",
+    "rrweb": "^2.0.0-alpha.4",
+    "rrweb-snapshot": "^2.0.0-alpha.4",
     "uuid": "^13.0.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "nodemon": "^3.1.14"
   }
 }

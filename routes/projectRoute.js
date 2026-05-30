@@ -252,6 +252,91 @@ router.get("/:id/heatmaps/urls", authMiddleware, async (req, res) => {
   }
 });
 
+function mapSessionRow(s) {
+  const pageCount =
+    s.pageCount != null && s.pageCount > 0
+      ? s.pageCount
+      : s.pages && s.pages.length > 0
+        ? s.pages.length
+        : 1;
+  const hasSnapshot =
+    (typeof s.snapshot === "string" && s.snapshot.trim().length > 0) ||
+    (Array.isArray(s.pages) && s.pages.some((p) => p.snapshot && String(p.snapshot).trim().length > 0));
+  const row = {
+    sessionId: s.sessionId,
+    startedAt: s.startedAt,
+    url: s.url,
+    eventCount: s.eventCount,
+    duration: s.duration,
+    deviceType: s.deviceType,
+    viewport: s.viewport,
+    pageCount,
+    hasRrweb: !!s.hasRrweb,
+    rrwebStatus: s.rrwebStatus || "none",
+    hasSnapshot,
+    rageClickCount: s.rageClickCount || 0,
+    deadClickCount: s.deadClickCount || 0,
+    errorCount: s.errorCount || 0,
+    starred: !!s.starred,
+    tags: s.tags || [],
+    rrwebChunkCount: s.rrwebChunkCount || 0
+  };
+  return row;
+}
+
+function buildSessionsFilter(projectId, query) {
+  const filter = {
+    projectId,
+    eventCount: { $gt: 0 }
+  };
+
+  if (query.search && String(query.search).trim()) {
+    const escaped = String(query.search).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    filter.$or = [
+      { url: { $regex: escaped, $options: "i" } },
+      { sessionId: { $regex: escaped, $options: "i" } }
+    ];
+  }
+
+  if (query.from || query.to) {
+    filter.startedAt = {};
+    if (query.from) {
+      const from = new Date(query.from);
+      if (!Number.isNaN(from.getTime())) filter.startedAt.$gte = from;
+    }
+    if (query.to) {
+      const to = new Date(query.to);
+      if (!Number.isNaN(to.getTime())) {
+        to.setHours(23, 59, 59, 999);
+        filter.startedAt.$lte = to;
+      }
+    }
+    if (Object.keys(filter.startedAt).length === 0) delete filter.startedAt;
+  }
+
+  if (query.device) {
+    const d = String(query.device).toLowerCase();
+    if (d === "desktop") filter.deviceType = "desktop";
+    else if (d === "tablet") filter.deviceType = "tablet";
+    else if (d === "mobile") filter.deviceType = { $in: ["android", "ios"] };
+  }
+
+  if (query.minDuration != null && query.minDuration !== "") {
+    const minDur = parseInt(query.minDuration, 10);
+    if (!Number.isNaN(minDur) && minDur >= 0) {
+      filter.duration = { $gte: minDur };
+    }
+  }
+
+  if (query.hasRrweb === "true") filter.hasRrweb = true;
+  if (query.hasRageClicks === "true") filter.rageClickCount = { $gt: 0 };
+  if (query.hasErrors === "true") filter.errorCount = { $gt: 0 };
+  if (query.starred === "true") filter.starred = true;
+  if (query.tag) filter.tags = String(query.tag);
+
+  return filter;
+}
+
 // Get Project Sessions (must be before /:id)
 router.get("/:id/sessions", authMiddleware, async (req, res) => {
   try {
@@ -262,15 +347,81 @@ router.get("/:id/sessions", authMiddleware, async (req, res) => {
     if (project.userId.toString() !== req.user.id) {
       return res.status(403).json({ message: "Access denied" });
     }
-    const sessions = await Session.find({
-      projectId: project._id,
-      eventCount: { $gt: 0 }
-    })
-      .sort({ startedAt: -1 })
-      .limit(100)
-      .select("sessionId startedAt url eventCount duration deviceType viewport pages")
-      .lean();
-    return res.json(sessions);
+
+    const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 25));
+    const sortField = ["startedAt", "duration", "eventCount", "pageCount"].includes(req.query.sort)
+      ? req.query.sort
+      : "startedAt";
+    const order = req.query.order === "asc" ? 1 : -1;
+    const filter = buildSessionsFilter(project._id, req.query);
+    const skip = (page - 1) * limit;
+
+    const total = await Session.countDocuments(filter);
+
+    let items;
+    if (sortField === "pageCount") {
+      const pipeline = [
+        { $match: filter },
+        {
+          $addFields: {
+            pageCount: {
+              $cond: {
+                if: { $gt: [{ $size: { $ifNull: ["$pages", []] } }, 0] },
+                then: { $size: "$pages" },
+                else: 1
+              }
+            }
+          }
+        },
+        { $sort: { pageCount: order, startedAt: -1 } },
+        { $skip: skip },
+        { $limit: limit },
+        {
+          $project: {
+            sessionId: 1,
+            startedAt: 1,
+            url: 1,
+            eventCount: 1,
+            duration: 1,
+            deviceType: 1,
+            viewport: 1,
+            pageCount: 1,
+            hasRrweb: 1,
+            rrwebStatus: 1,
+            snapshot: 1,
+            pages: 1,
+            rageClickCount: 1,
+            deadClickCount: 1,
+            errorCount: 1,
+            starred: 1,
+            tags: 1,
+            rrwebChunkCount: 1
+          }
+        }
+      ];
+      items = (await Session.aggregate(pipeline)).map(mapSessionRow);
+    } else {
+      const sessions = await Session.find(filter)
+        .sort({ [sortField]: order, startedAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .select(
+          "sessionId startedAt url eventCount duration deviceType viewport pages snapshot hasRrweb rrwebStatus rageClickCount deadClickCount errorCount starred tags rrwebChunkCount"
+        )
+        .lean();
+      items = sessions.map(mapSessionRow);
+    }
+
+    const totalPages = total === 0 ? 0 : Math.ceil(total / limit);
+
+    return res.json({
+      items,
+      total,
+      page,
+      limit,
+      totalPages
+    });
   } catch (error) {
     console.error("Get project sessions error:", error);
     return res.status(500).json({ message: "Internal server error" });
