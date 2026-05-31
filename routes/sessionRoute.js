@@ -583,6 +583,11 @@ router.post("/session/rrweb-chunk", async (req, res) => {
       return res.status(400).json({ error: "invalid events" });
     }
 
+    const approxBytes = JSON.stringify(eventsArray).length;
+    if (approxBytes > 15 * 1024 * 1024) {
+      return res.status(413).json({ ok: false, code: "chunk_too_large", message: "Chunk exceeds size limit" });
+    }
+
     const chunkDoc = {
       sessionId: session._id,
       type: "rrweb_chunk",
@@ -599,7 +604,7 @@ router.post("/session/rrweb-chunk", async (req, res) => {
 
     const rrwebStatus = deriveRrwebStatus(session.rrwebStatus, eventsArray, !!isCheckout);
     if (chunkIndex === 1 && !chunkHasFullSnapshot(eventsArray)) {
-      console.warn(`[rrweb-chunk] session=${sessionId} first chunk missing full snapshot event`);
+      console.warn(`[rrweb-chunk] session=${sessionId} first chunk missing full snapshot (${eventsArray.length} events, ~${approxBytes} bytes)`);
     }
 
     await Session.updateOne(
@@ -617,7 +622,10 @@ router.post("/session/rrweb-chunk", async (req, res) => {
 
     return res.status(202).json({ ok: true });
   } catch (err) {
-    console.error("rrweb-chunk error:", err);
+    console.error("rrweb-chunk error:", err.message || err);
+    if (err.message && /document too large|BSONObj size/i.test(err.message)) {
+      return res.status(413).json({ ok: false, code: "chunk_too_large", message: "Chunk too large to store" });
+    }
     return res.status(500).json({ error: "server error" });
   }
 });

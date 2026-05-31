@@ -37,6 +37,8 @@ import { record } from 'rrweb';
 
   var DB_NAME = 'wt_offline';
   var STORE = 'chunks';
+  var MAX_CHUNK_JSON_BYTES = 6 * 1024 * 1024;
+  var RRWEB_FULL_SNAPSHOT = 2;
 
   window.__tracker = {
     optOut: function () {
@@ -154,8 +156,12 @@ import { record } from 'rrweb';
     try {
       if (trySendBeacon(endpoint, payload)) return Promise.resolve(true);
       return fetch(endpoint, trackerFetchOpts(payload)).then(function (res) {
+        if (!res.ok) {
+          wtWarn('Chunk upload failed: HTTP ' + res.status);
+        }
         return res.ok;
       }).catch(function () {
+        wtWarn('Chunk upload network error');
         if (attempt < MAX_RETRIES) {
           return new Promise(function (r) {
             setTimeout(r, 1000 * Math.pow(2, attempt));
@@ -226,24 +232,14 @@ import { record } from 'rrweb';
 
   function handleRrwebEvent(event, isCheckout) {
     rrwebBuffer.push(event);
+    if (event && event.type === RRWEB_FULL_SNAPSHOT && chunkIndex === 0) {
+      flushRrwebChunk(true);
+      return;
+    }
     if (isCheckout) flushRrwebChunk(true);
   }
 
-  function flushRrwebChunk(isCheckout) {
-    isCheckout = !!isCheckout;
-    if (rrwebBuffer.length === 0 || !sessionInitialized) return Promise.resolve();
-    var events = rrwebBuffer.splice(0);
-    chunkIndex += 1;
-
-    var payloadObj = {
-      apiKey: apiKey,
-      sessionId: sessionId,
-      chunkIndex: chunkIndex,
-      isCheckout: isCheckout,
-      recordedAt: Date.now(),
-      events: events
-    };
-
+  function postChunkPayload(payloadObj, isCheckout) {
     var payload = JSON.stringify(payloadObj);
     var body = payload;
     var encoding = 'identity';
@@ -256,13 +252,44 @@ import { record } from 'rrweb';
       return enqueueChunk({
         apiKey: apiKey,
         sessionId: sessionId,
-        chunkIndex: chunkIndex,
+        chunkIndex: payloadObj.chunkIndex,
         isCheckout: isCheckout,
         recordedAt: payloadObj.recordedAt,
         body: body,
         encoding: encoding
       });
     });
+  }
+
+  function flushEventsList(events, isCheckout) {
+    if (events.length === 0 || !sessionInitialized) return Promise.resolve();
+
+    chunkIndex += 1;
+    var payloadObj = {
+      apiKey: apiKey,
+      sessionId: sessionId,
+      chunkIndex: chunkIndex,
+      isCheckout: isCheckout,
+      recordedAt: Date.now(),
+      events: events
+    };
+
+    if (JSON.stringify(payloadObj).length > MAX_CHUNK_JSON_BYTES && events.length > 1) {
+      chunkIndex -= 1;
+      var mid = Math.ceil(events.length / 2);
+      return flushEventsList(events.slice(0, mid), isCheckout).then(function () {
+        return flushEventsList(events.slice(mid), false);
+      });
+    }
+
+    return postChunkPayload(payloadObj, isCheckout);
+  }
+
+  function flushRrwebChunk(isCheckout) {
+    isCheckout = !!isCheckout;
+    if (rrwebBuffer.length === 0 || !sessionInitialized) return Promise.resolve();
+    var events = rrwebBuffer.splice(0);
+    return flushEventsList(events, isCheckout);
   }
 
   function compressPayload(payload) {
@@ -306,8 +333,17 @@ import { record } from 'rrweb';
     }
   }
 
+  function applyBlockClasses() {
+    try {
+      document.querySelectorAll('[data-wt-block]').forEach(function (el) {
+        el.classList.add('wt-no-record');
+      });
+    } catch (e) {}
+  }
+
   function startRrweb() {
     if (stopRecording) return;
+    applyBlockClasses();
     stopRecording = record({
       emit: function (event, isCheckout) {
         handleRrwebEvent(event, isCheckout);
@@ -316,11 +352,11 @@ import { record } from 'rrweb';
       checkoutEveryNms: 25000,
       maskAllInputs: true,
       maskInputOptions: { password: true, email: true, tel: true, creditCard: true },
-      blockSelector: '[data-wt-block], .wt-no-record',
+      blockClass: 'wt-no-record',
       maskTextSelector: '[data-wt-mask]',
-      recordCanvas: true,
+      recordCanvas: false,
       collectFonts: true,
-      inlineImages: true,
+      inlineImages: false,
       inlineStylesheet: true,
       sampling: {
         mousemove: 50,
