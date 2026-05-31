@@ -4,8 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "build:tracker": "esbuild tracker-entry.js --bundle --outfile=public/tracker.bundle.js --platform=browser --target=chrome80 --minify --format=iife",
-    "prestart": "npm run build:tracker",
+    "build:tracker": "node scripts/build-tracker.js",
+    "prestart": "node scripts/ensure-tracker-bundle.js",
     "start": "node index.js",
     "predev": "npm run build:tracker",
     "dev": "nodemon index.js",
@@ -24,10 +24,10 @@
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.2.1",
     "rrweb": "^2.0.0-alpha.4",
-    "rrweb-snapshot": "^2.0.0-alpha.4"
+    "rrweb-snapshot": "^2.0.0-alpha.4",
+    "esbuild": "^0.25.0"
   },
   "devDependencies": {
-    "esbuild": "^0.25.0",
     "nodemon": "^3.1.14"
   }
 }
