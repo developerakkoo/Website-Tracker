@@ -82,6 +82,27 @@ router.post("/login", async (req, res) => {
   }
 });
 
+// Reset password (no email verification — email + new password only)
+router.post("/reset-password", async (req, res) => {
+  try {
+    const creds = validateCredentials(req, res);
+    if (!creds) return;
+
+    const user = await User.findOne({ email: creds.email });
+    if (!user) {
+      return res.status(404).json({ message: "No account found with this email" });
+    }
+
+    user.password = await bcrypt.hash(creds.password, 10);
+    await user.save();
+
+    return res.json({ message: "Password updated successfully" });
+  } catch (err) {
+    console.error("Reset password error:", err);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+});
+
 // Current user (protected)
 router.get("/me", authMiddleware, async (req, res) => {
   try {
