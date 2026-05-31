@@ -24,8 +24,7 @@
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.2.1",
     "rrweb": "^2.0.0-alpha.4",
-    "rrweb-snapshot": "^2.0.0-alpha.4",
-    "uuid": "^13.0.0"
+    "rrweb-snapshot": "^2.0.0-alpha.4"
   },
   "devDependencies": {
     "esbuild": "^0.25.0",
