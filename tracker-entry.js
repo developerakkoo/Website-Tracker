@@ -37,8 +37,11 @@ import { record } from 'rrweb';
 
   var DB_NAME = 'wt_offline';
   var STORE = 'chunks';
-  var MAX_CHUNK_JSON_BYTES = 6 * 1024 * 1024;
+  var MAX_CHUNK_JSON_BYTES = 3 * 1024 * 1024;
+  var KEEPALIVE_MAX_BYTES = 60000;
+  var UPLOAD_TIMEOUT_MS = 120000;
   var RRWEB_FULL_SNAPSHOT = 2;
+  var uploadQueue = Promise.resolve();
 
   window.__tracker = {
     optOut: function () {
@@ -115,14 +118,34 @@ import { record } from 'rrweb';
     }
   }
 
-  function trackerFetchOpts(body) {
+  function trackerFetchOpts(body, options) {
+    options = options || {};
+    var useKeepalive = options.keepalive !== false;
+    if (useKeepalive && body && body.length > KEEPALIVE_MAX_BYTES) {
+      useKeepalive = false;
+    }
     return {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: body,
-      keepalive: true,
+      keepalive: useKeepalive,
       credentials: 'omit'
     };
+  }
+
+  function fetchWithTimeout(url, opts, timeoutMs) {
+    timeoutMs = timeoutMs || UPLOAD_TIMEOUT_MS;
+    if (typeof AbortController === 'undefined') {
+      return fetch(url, opts);
+    }
+    var controller = new AbortController();
+    var timer = setTimeout(function () {
+      controller.abort();
+    }, timeoutMs);
+    opts = Object.assign({}, opts, { signal: controller.signal });
+    return fetch(url, opts).finally(function () {
+      clearTimeout(timer);
+    });
   }
 
   function trySendBeacon(url, payload) {
@@ -155,13 +178,17 @@ import { record } from 'rrweb';
     var payload = JSON.stringify(chunk);
     try {
       if (trySendBeacon(endpoint, payload)) return Promise.resolve(true);
-      return fetch(endpoint, trackerFetchOpts(payload)).then(function (res) {
+      return fetchWithTimeout(endpoint, trackerFetchOpts(payload, { keepalive: false })).then(function (res) {
         if (!res.ok) {
           wtWarn('Chunk upload failed: HTTP ' + res.status);
         }
         return res.ok;
-      }).catch(function () {
-        wtWarn('Chunk upload network error');
+      }).catch(function (err) {
+        if (err && err.name === 'AbortError') {
+          wtWarn('Chunk upload timed out after ' + (UPLOAD_TIMEOUT_MS / 1000) + 's');
+        } else {
+          wtWarn('Chunk upload network error');
+        }
         if (attempt < MAX_RETRIES) {
           return new Promise(function (r) {
             setTimeout(r, 1000 * Math.pow(2, attempt));
@@ -177,20 +204,23 @@ import { record } from 'rrweb';
   }
 
   function enqueueChunk(chunk) {
-    return sendChunk(chunk).then(function (sent) {
-      if (!sent) {
-        return openDb().then(function (db) {
-          return new Promise(function (resolve, reject) {
-            var tx = db.transaction(STORE, 'readwrite');
-            tx.objectStore(STORE).add(chunk);
-            tx.oncomplete = function () {
-              resolve();
-            };
-            tx.onerror = reject;
+    uploadQueue = uploadQueue.then(function () {
+      return sendChunk(chunk).then(function (sent) {
+        if (!sent) {
+          return openDb().then(function (db) {
+            return new Promise(function (resolve, reject) {
+              var tx = db.transaction(STORE, 'readwrite');
+              tx.objectStore(STORE).add(chunk);
+              tx.oncomplete = function () {
+                resolve();
+              };
+              tx.onerror = reject;
+            });
           });
-        });
-      }
+        }
+      });
     });
+    return uploadQueue;
   }
 
   function replayOfflineChunks() {
@@ -241,13 +271,18 @@ import { record } from 'rrweb';
 
   function postChunkPayload(payloadObj, isCheckout) {
     var payload = JSON.stringify(payloadObj);
-    var body = payload;
-    var encoding = 'identity';
 
     return compressPayload(payload).then(function (compressed) {
       if (compressed) {
-        body = compressed.body;
-        encoding = compressed.encoding;
+        return enqueueChunk({
+          apiKey: apiKey,
+          sessionId: sessionId,
+          chunkIndex: payloadObj.chunkIndex,
+          isCheckout: isCheckout,
+          recordedAt: payloadObj.recordedAt,
+          body: compressed.body,
+          encoding: compressed.encoding
+        });
       }
       return enqueueChunk({
         apiKey: apiKey,
@@ -255,8 +290,8 @@ import { record } from 'rrweb';
         chunkIndex: payloadObj.chunkIndex,
         isCheckout: isCheckout,
         recordedAt: payloadObj.recordedAt,
-        body: body,
-        encoding: encoding
+        events: payloadObj.events,
+        encoding: 'identity'
       });
     });
   }
@@ -355,9 +390,10 @@ import { record } from 'rrweb';
       blockClass: 'wt-no-record',
       maskTextSelector: '[data-wt-mask]',
       recordCanvas: false,
-      collectFonts: true,
+      collectFonts: false,
       inlineImages: false,
       inlineStylesheet: true,
+      slimDOMOptions: 'all',
       sampling: {
         mousemove: 50,
         scroll: 100,
@@ -443,7 +479,7 @@ import { record } from 'rrweb';
         body = payload;
       }
 
-      return fetch(API_BASE + '/api/session/capture', trackerFetchOpts(body))
+      return fetchWithTimeout(API_BASE + '/api/session/capture', trackerFetchOpts(body, { keepalive: false }))
         .then(function (res) {
           return res.json().then(function (data) {
             return { ok: res.ok, data: data };
