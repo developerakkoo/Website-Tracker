@@ -17,7 +17,13 @@ const goalRoutes = require('./routes/goalRoute');
 
 connectDB();
 const app = express();
-app.use(cors());
+// Reflect request origin (required when tracker uses sendBeacon same-origin, or credentials)
+app.use(cors({
+  origin: true,
+  credentials: true,
+  methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
 // Tracker payloads (snapshots, rrweb chunks) can exceed default 100kb limit
 const TRACKER_BODY_LIMIT = "15mb";
 app.use(bodyParser.json({ limit: TRACKER_BODY_LIMIT }));

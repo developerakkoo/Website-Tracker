@@ -104,6 +104,35 @@ import { record } from 'rrweb';
     }
   }
 
+  /** sendBeacon uses credentials:include cross-origin — incompatible with ACAO:* */
+  function isCrossOriginApi() {
+    try {
+      return new URL(API_BASE).origin !== window.location.origin;
+    } catch (e) {
+      return true;
+    }
+  }
+
+  function trackerFetchOpts(body) {
+    return {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: body,
+      keepalive: true,
+      credentials: 'omit'
+    };
+  }
+
+  function trySendBeacon(url, payload) {
+    if (!navigator.sendBeacon || isCrossOriginApi()) return false;
+    try {
+      var blob = new Blob([payload], { type: 'application/json' });
+      return navigator.sendBeacon(url, blob);
+    } catch (e) {
+      return false;
+    }
+  }
+
   function openDb() {
     return new Promise(function (res, rej) {
       var req = indexedDB.open(DB_NAME, 1);
@@ -123,16 +152,8 @@ import { record } from 'rrweb';
     var endpoint = API_BASE + '/api/session/rrweb-chunk';
     var payload = JSON.stringify(chunk);
     try {
-      if (navigator.sendBeacon) {
-        var blob = new Blob([payload], { type: 'application/json' });
-        if (navigator.sendBeacon(endpoint, blob)) return Promise.resolve(true);
-      }
-      return fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: payload,
-        keepalive: true
-      }).then(function (res) {
+      if (trySendBeacon(endpoint, payload)) return Promise.resolve(true);
+      return fetch(endpoint, trackerFetchOpts(payload)).then(function (res) {
         return res.ok;
       }).catch(function () {
         if (attempt < MAX_RETRIES) {
@@ -314,17 +335,9 @@ import { record } from 'rrweb';
 
   function sendRequest(url, data, useBeacon) {
     try {
-      if (useBeacon && navigator.sendBeacon) {
-        var blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
-        return navigator.sendBeacon(url, blob);
-      }
-      if (useBeacon) return false;
-      fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data),
-        keepalive: true
-      }).catch(function () {});
+      var payload = JSON.stringify(data);
+      if (useBeacon && trySendBeacon(url, payload)) return true;
+      fetch(url, trackerFetchOpts(payload)).catch(function () {});
       return true;
     } catch (e) {
       return false;
@@ -358,12 +371,11 @@ import { record } from 'rrweb';
       for (var i = 0; i < links.length && i < 20; i++) {
         var href = links[i].href;
         if (!href || isTrackerUrl(href)) continue;
-        fetch(API_BASE + '/api/session/mirror-asset', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ apiKey: apiKey, sessionId: sessionId, url: href }),
-          keepalive: true
-        }).catch(function () {});
+        fetch(API_BASE + '/api/session/mirror-asset', trackerFetchOpts(JSON.stringify({
+          apiKey: apiKey,
+          sessionId: sessionId,
+          url: href
+        }))).catch(function () {});
       }
     } catch (e) {}
   }
@@ -395,12 +407,7 @@ import { record } from 'rrweb';
         body = payload;
       }
 
-      return fetch(API_BASE + '/api/session/capture', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: body,
-        keepalive: true
-      })
+      return fetch(API_BASE + '/api/session/capture', trackerFetchOpts(body))
         .then(function (res) {
           return res.json().then(function (data) {
             return { ok: res.ok, data: data };
@@ -533,17 +540,13 @@ import { record } from 'rrweb';
     fetchGoals();
     touchSessionExpiry();
     var viewport = { width: window.innerWidth || 0, height: window.innerHeight || 0 };
-    fetch(API_BASE + '/api/session/page', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        apiKey: apiKey,
-        sessionId: sessionId,
-        url: href,
-        timestamp: Date.now(),
-        viewport: viewport
-      })
-    })
+    fetch(API_BASE + '/api/session/page', trackerFetchOpts(JSON.stringify({
+      apiKey: apiKey,
+      sessionId: sessionId,
+      url: href,
+      timestamp: Date.now(),
+      viewport: viewport
+    })))
       .then(function (res) {
         return res.json().then(function (data) {
           return { ok: res.ok, data: data };
@@ -583,18 +586,14 @@ import { record } from 'rrweb';
     if (sessionInitialized || quotaBlocked) return;
     var screen = { width: window.screen.width || 0, height: window.screen.height || 0 };
     var viewport = { width: window.innerWidth || 0, height: window.innerHeight || 0 };
-    fetch(API_BASE + '/api/session/init', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        apiKey: apiKey,
-        sessionId: sessionId,
-        url: window.location.href,
-        userAgent: navigator.userAgent || '',
-        screen: screen,
-        viewport: viewport
-      })
-    })
+    fetch(API_BASE + '/api/session/init', trackerFetchOpts(JSON.stringify({
+      apiKey: apiKey,
+      sessionId: sessionId,
+      url: window.location.href,
+      userAgent: navigator.userAgent || '',
+      screen: screen,
+      viewport: viewport
+    })))
       .then(function (res) {
         return res.json().then(function (data) {
           return { ok: res.ok, status: res.status, data: data };
@@ -623,7 +622,9 @@ import { record } from 'rrweb';
 
   function fetchGoals() {
     try {
-      fetch(API_BASE + '/api/tracker/goals?apiKey=' + encodeURIComponent(apiKey))
+      fetch(API_BASE + '/api/tracker/goals?apiKey=' + encodeURIComponent(apiKey), {
+        credentials: 'omit'
+      })
         .then(function (res) {
           if (!res.ok) return;
           return res.json();
