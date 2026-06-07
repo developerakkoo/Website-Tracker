@@ -58,6 +58,9 @@ app.get("/demo", (req, res) => {
   res.sendFile(__dirname + "/home.html");
 });
 
+app.get("/version", (req, res) => {
+  res.send("1.0.0");
+});
 app.listen(PORT, () => {
   console.log(`API listening on port ${PORT}`);
   console.log(`  Dashboard API:  http://localhost:${PORT}/api`);
