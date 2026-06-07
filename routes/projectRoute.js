@@ -287,15 +287,23 @@ function mapSessionRow(s) {
 function buildSessionsFilter(projectId, query) {
   const filter = {
     projectId,
-    eventCount: { $gt: 0 }
+    $or: [
+      { eventCount: { $gt: 0 } },
+      { hasRrweb: true },
+      { rrwebChunkCount: { $gt: 0 } },
+      { snapshot: { $exists: true, $nin: [null, ""] } },
+      { pages: { $elemMatch: { snapshot: { $regex: /\S/ } } } }
+    ]
   };
 
   if (query.search && String(query.search).trim()) {
     const escaped = String(query.search).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    filter.$or = [
+    const searchOr = [
       { url: { $regex: escaped, $options: "i" } },
       { sessionId: { $regex: escaped, $options: "i" } }
     ];
+    filter.$and = [{ $or: filter.$or }, { $or: searchOr }];
+    delete filter.$or;
   }
 
   if (query.from || query.to) {

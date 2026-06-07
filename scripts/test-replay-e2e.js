@@ -43,7 +43,11 @@ async function main() {
     console.error("FAIL init", init.status, init.data);
     process.exit(1);
   }
-  console.log("OK  session/init");
+  if (init.data.nextChunkIndex !== 1) {
+    console.error("FAIL init nextChunkIndex", init.data);
+    process.exit(1);
+  }
+  console.log("OK  session/init nextChunkIndex=1");
 
   const fakeSnapshot = "<html><head><title>E2E</title></head><body><h1>Test</h1></body></html>";
   const capture = await post("/session/capture", {
@@ -61,6 +65,7 @@ async function main() {
     apiKey: API_KEY,
     sessionId,
     chunkIndex: 1,
+    segmentId: crypto.randomUUID(),
     isCheckout: true,
     recordedAt: Date.now(),
     events: [
@@ -72,11 +77,11 @@ async function main() {
       }
     ]
   });
-  if (!rrwebChunk.ok) {
+  if (rrwebChunk.status !== 202) {
     console.error("FAIL rrweb-chunk", rrwebChunk.status, rrwebChunk.data);
     process.exit(1);
   }
-  console.log("OK  session/rrweb-chunk");
+  console.log("OK  session/rrweb-chunk (202)");
 
   const events = await post("/session/events", {
     apiKey: API_KEY,

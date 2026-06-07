@@ -71,8 +71,11 @@ async function main() {
       if (!init.data.resumed || init.data.pageIndex !== i) {
         console.error(`Page ${i + 1}: expected resume pageIndex ${i}`, init);
         failures++;
+      } else if (typeof init.data.nextChunkIndex !== "number" || init.data.nextChunkIndex < 1) {
+        console.error(`Page ${i + 1}: missing nextChunkIndex`, init.data);
+        failures++;
       } else {
-        console.log(`Page ${i + 1}: resumed at pageIndex ${init.data.pageIndex} OK`);
+        console.log(`Page ${i + 1}: resumed at pageIndex ${init.data.pageIndex} nextChunkIndex=${init.data.nextChunkIndex} OK`);
       }
     }
 

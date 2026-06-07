@@ -63,6 +63,12 @@ const sessionSchema = new mongoose.Schema({
     enum: ["none", "partial", "complete"],
     default: "none"
   },
+  recordingHealth: {
+    hasFullSnapshot: { type: Boolean, default: false },
+    chunkCount: { type: Number, default: 0 },
+    lastChunkAt: { type: Date },
+    failedChunks: { type: Number, default: 0 }
+  },
   rageClickCount: { type: Number, default: 0 },
   deadClickCount: { type: Number, default: 0 },
   errorCount: { type: Number, default: 0 },

@@ -31,6 +31,9 @@ import { record } from 'rrweb';
   var stopRecording = null;
   var rrwebBuffer = [];
   var chunkIndex = 0;
+  var segmentId = null;
+  var firstChunkSentThisSegment = false;
+  var uploadStats = { chunksOk: 0, chunksFailed: 0 };
   var lastSnapshotBytes = 0;
   var lastCaptureSuccess = false;
   var captureTimers = [];
@@ -180,10 +183,14 @@ import { record } from 'rrweb';
       if (trySendBeacon(endpoint, payload)) return Promise.resolve(true);
       return fetchWithTimeout(endpoint, trackerFetchOpts(payload, { keepalive: false })).then(function (res) {
         if (!res.ok) {
+          uploadStats.chunksFailed += 1;
           wtWarn('Chunk upload failed: HTTP ' + res.status);
+        } else {
+          uploadStats.chunksOk += 1;
         }
         return res.ok;
       }).catch(function (err) {
+        uploadStats.chunksFailed += 1;
         if (err && err.name === 'AbortError') {
           wtWarn('Chunk upload timed out after ' + (UPLOAD_TIMEOUT_MS / 1000) + 's');
         } else {
@@ -261,12 +268,24 @@ import { record } from 'rrweb';
   }
 
   function handleRrwebEvent(event, isCheckout) {
+    if (!sessionInitialized) return;
     rrwebBuffer.push(event);
-    if (event && event.type === RRWEB_FULL_SNAPSHOT && chunkIndex === 0) {
+    if (event && event.type === RRWEB_FULL_SNAPSHOT && !firstChunkSentThisSegment) {
       flushRrwebChunk(true);
       return;
     }
     if (isCheckout) flushRrwebChunk(true);
+  }
+
+  function chunkEnvelope(extra) {
+    return Object.assign(
+      {
+        apiKey: apiKey,
+        sessionId: sessionId,
+        segmentId: segmentId
+      },
+      extra
+    );
   }
 
   function postChunkPayload(payloadObj, isCheckout) {
@@ -274,25 +293,21 @@ import { record } from 'rrweb';
 
     return compressPayload(payload).then(function (compressed) {
       if (compressed) {
-        return enqueueChunk({
-          apiKey: apiKey,
-          sessionId: sessionId,
+        return enqueueChunk(chunkEnvelope({
           chunkIndex: payloadObj.chunkIndex,
           isCheckout: isCheckout,
           recordedAt: payloadObj.recordedAt,
           body: compressed.body,
           encoding: compressed.encoding
-        });
+        }));
       }
-      return enqueueChunk({
-        apiKey: apiKey,
-        sessionId: sessionId,
+      return enqueueChunk(chunkEnvelope({
         chunkIndex: payloadObj.chunkIndex,
         isCheckout: isCheckout,
         recordedAt: payloadObj.recordedAt,
         events: payloadObj.events,
         encoding: 'identity'
-      });
+      }));
     });
   }
 
@@ -317,7 +332,9 @@ import { record } from 'rrweb';
       });
     }
 
-    return postChunkPayload(payloadObj, isCheckout);
+    return postChunkPayload(payloadObj, isCheckout).then(function () {
+      firstChunkSentThisSegment = true;
+    });
   }
 
   function flushRrwebChunk(isCheckout) {
@@ -641,6 +658,10 @@ import { record } from 'rrweb';
     sessionInitialized = true;
     touchSessionExpiry();
     persistSession(sessionId);
+    segmentId = crypto.randomUUID();
+    firstChunkSentThisSegment = false;
+    var nextIdx = data && typeof data.nextChunkIndex === 'number' ? data.nextChunkIndex : 1;
+    chunkIndex = Math.max(0, nextIdx - 1);
     lastHref = window.location.href;
     if (data && data.resumed) {
       currentPageIndex = typeof data.pageIndex === 'number' ? data.pageIndex : 0;
@@ -872,12 +893,36 @@ import { record } from 'rrweb';
     } catch (err) {}
   }
 
+  function sendRecordingStatus(useBeacon) {
+    if (!sessionInitialized) return;
+    var payload = {
+      apiKey: apiKey,
+      sessionId: sessionId,
+      chunksOk: uploadStats.chunksOk,
+      chunksFailed: uploadStats.chunksFailed
+    };
+    sendRequest(API_BASE + '/api/session/recording-status', payload, useBeacon);
+  }
+
+  function endSessionBeacon() {
+    sendRequest(
+      API_BASE + '/api/session/end',
+      { apiKey: apiKey, sessionId: sessionId },
+      true
+    );
+  }
+
   function handlePageHide() {
     flushEvents();
+    sendRecordingStatus(true);
+    endSessionBeacon();
   }
 
   function handleVisibilityChange() {
-    if (document.visibilityState === 'hidden') flushEvents();
+    if (document.visibilityState === 'hidden') {
+      touchSessionExpiry();
+      flushEvents();
+    }
   }
 
   function installConsoleCapture() {

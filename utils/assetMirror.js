@@ -124,4 +124,28 @@ function getMirroredAsset(hash) {
   };
 }
 
-module.exports = { mirrorAsset, getMirroredAsset, hashUrl, MIRROR_DIR };
+function extractFontUrlsFromCss(cssText, baseUrl) {
+  const urls = [];
+  if (!cssText || typeof cssText !== "string") return urls;
+  const re = /url\(\s*['"]?([^'")]+)['"]?\s*\)/gi;
+  let m;
+  while ((m = re.exec(cssText))) {
+    const ref = m[1].trim();
+    if (!/\.(woff2?|ttf|otf|eot)(\?|$)/i.test(ref)) continue;
+    if (ref.startsWith("data:")) continue;
+    try {
+      urls.push(new URL(ref, baseUrl).href);
+    } catch {
+      /* skip invalid */
+    }
+  }
+  return [...new Set(urls)];
+}
+
+module.exports = {
+  mirrorAsset,
+  getMirroredAsset,
+  hashUrl,
+  MIRROR_DIR,
+  extractFontUrlsFromCss
+};

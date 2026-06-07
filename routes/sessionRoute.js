@@ -1,4 +1,5 @@
 const express = require("express");
+const crypto = require("crypto");
 const zlib = require("zlib");
 const { promisify } = require("util");
 const Session = require("../modal/session");
@@ -8,7 +9,11 @@ const authMiddleware = require("../middleware/authMiddleware");
 const heatmapAggregator = require("../utils/heatmapAggregator");
 const goalClickAggregator = require("../utils/goalClickAggregator");
 const { normalizeSnapshot } = require("../utils/snapshotSanitizer");
-const { mirrorAsset, getMirroredAsset } = require("../utils/assetMirror");
+const {
+  mirrorAsset,
+  getMirroredAsset,
+  extractFontUrlsFromCss
+} = require("../utils/assetMirror");
 
 const router = express.Router();
 
@@ -36,13 +41,69 @@ function chunkHasFullSnapshot(eventsArray) {
   return eventsArray.some((ev) => ev && ev.type === RRWEB_FULL_SNAPSHOT_TYPE);
 }
 
-function deriveRrwebStatus(existingStatus, eventsArray, isCheckout) {
-  if (chunkHasFullSnapshot(eventsArray)) {
-    return isCheckout ? "complete" : "partial";
-  }
-  if (isCheckout && existingStatus !== "none") return "complete";
+function deriveRrwebStatus(existingStatus, eventsArray, isCheckout, sessionHasFullSnapshot) {
+  const hasFs = chunkHasFullSnapshot(eventsArray);
+  const anyFs = hasFs || !!sessionHasFullSnapshot;
+  if (isCheckout && anyFs) return "complete";
+  if (hasFs) return existingStatus === "complete" ? "complete" : "partial";
   if (existingStatus === "none" && eventsArray.length > 0) return "partial";
   return existingStatus || "none";
+}
+
+function sessionHasRecording(session) {
+  if (session.eventCount > 0) return true;
+  if (session.hasRrweb || (session.rrwebChunkCount && session.rrwebChunkCount > 0)) return true;
+  if (typeof session.snapshot === "string" && session.snapshot.trim().length > 0) return true;
+  if (Array.isArray(session.pages)) {
+    return session.pages.some((p) => typeof p.snapshot === "string" && p.snapshot.trim().length > 0);
+  }
+  return false;
+}
+
+async function getChunkCursor(sessionDoc) {
+  const maxChunk = await Event.findOne(
+    { sessionId: sessionDoc._id, type: "rrweb_chunk" },
+    { "data.chunkIndex": 1 }
+  )
+    .sort({ "data.chunkIndex": -1 })
+    .lean();
+  const nextChunkIndex = (maxChunk?.data?.chunkIndex || 0) + 1;
+  const rrwebChunkCount =
+    typeof sessionDoc.rrwebChunkCount === "number"
+      ? sessionDoc.rrwebChunkCount
+      : await Event.countDocuments({ sessionId: sessionDoc._id, type: "rrweb_chunk" });
+  return { nextChunkIndex, rrwebChunkCount };
+}
+
+function buildInitPayload(base, sessionDoc) {
+  return {
+    ...base,
+    nextChunkIndex: 1,
+    rrwebChunkCount: 0,
+    recordingHealth: sessionDoc?.recordingHealth || {
+      hasFullSnapshot: false,
+      chunkCount: 0,
+      failedChunks: 0
+    }
+  };
+}
+
+async function buildResumeInitPayload(base, sessionDoc) {
+  const cursor = await getChunkCursor(sessionDoc);
+  return {
+    ...base,
+    nextChunkIndex: cursor.nextChunkIndex,
+    rrwebChunkCount: cursor.rrwebChunkCount,
+    recordingHealth: sessionDoc.recordingHealth || {
+      hasFullSnapshot: false,
+      chunkCount: cursor.rrwebChunkCount,
+      failedChunks: 0
+    }
+  };
+}
+
+function hashEventsArray(eventsArray) {
+  return crypto.createHash("sha256").update(JSON.stringify(eventsArray)).digest("hex");
 }
 
 function deriveDeviceType(userAgent) {
@@ -114,23 +175,31 @@ router.post("/session/init", async (req, res) => {
       await Session.findByIdAndUpdate(existing._id, {
         $set: { url, lastActivity: new Date() }
       });
-      return res.json({
-        success: true,
-        resumed: true,
-        pageIndex: pages.length - 1,
-        newPage: false,
-        sessionId
-      });
+      const payload = await buildResumeInitPayload(
+        {
+          success: true,
+          resumed: true,
+          pageIndex: pages.length - 1,
+          newPage: false,
+          sessionId
+        },
+        existing
+      );
+      return res.json(payload);
     }
 
     const pageIndex = await appendPageToSession(existing, url, viewport);
-    return res.json({
-      success: true,
-      resumed: true,
-      pageIndex,
-      newPage: true,
-      sessionId
-    });
+    const payload = await buildResumeInitPayload(
+      {
+        success: true,
+        resumed: true,
+        pageIndex,
+        newPage: true,
+        sessionId
+      },
+      existing
+    );
+    return res.json(payload);
   }
 
   const todayStart = new Date();
@@ -162,6 +231,7 @@ router.post("/session/init", async (req, res) => {
     ipAddress: req.ip,
     startedAt,
     lastActivity: new Date(),
+    recordingHealth: { hasFullSnapshot: false, chunkCount: 0, failedChunks: 0 },
     pages: [
       {
         url: url || "",
@@ -174,13 +244,18 @@ router.post("/session/init", async (req, res) => {
     ]
   });
 
-  res.json({
-    success: true,
-    resumed: false,
-    pageIndex: 0,
-    newPage: true,
-    sessionId
-  });
+  res.json(
+    buildInitPayload(
+      {
+        success: true,
+        resumed: false,
+        pageIndex: 0,
+        newPage: true,
+        sessionId
+      },
+      null
+    )
+  );
 });
 
 // New page in session (SPA / navigation) — POST /api/session/page
@@ -236,6 +311,17 @@ router.post("/session/mirror-asset", async (req, res) => {
 
     const result = await mirrorAsset(String(url));
     const mirrorUrl = `/api/mirror/${result.hash}`;
+
+    if (result.contentType && String(result.contentType).includes("text/css")) {
+      const asset = getMirroredAsset(result.hash);
+      if (asset?.buffer) {
+        const fontUrls = extractFontUrlsFromCss(asset.buffer.toString("utf8"), String(url));
+        fontUrls.slice(0, 15).forEach((fontUrl) => {
+          mirrorAsset(fontUrl).catch(() => {});
+        });
+      }
+    }
+
     return res.json({ ok: true, hash: result.hash, mirrorUrl, cached: result.cached });
   } catch (err) {
     console.error("mirror-asset error:", err.message);
@@ -249,6 +335,7 @@ router.get("/mirror/:hash", (req, res) => {
   if (!asset) return res.status(404).send("Not found");
   res.setHeader("Content-Type", asset.contentType);
   res.setHeader("Cache-Control", "public, max-age=31536000, immutable");
+  res.setHeader("Access-Control-Allow-Origin", "*");
   return res.send(asset.buffer);
 });
 
@@ -354,7 +441,7 @@ router.get("/session/:sessionId/full", authMiddleware, async (req, res) => {
   if (!session) {
     return res.status(404).json({ message: "Session not found" });
   }
-  if (!session.eventCount || session.eventCount <= 0) {
+  if (!sessionHasRecording(session)) {
     return res.status(404).json({ message: "This visit has no recording to play" });
   }
 
@@ -414,7 +501,7 @@ router.get("/session/:sessionId/events", authMiddleware, async (req, res) => {
   if (!session) {
     return res.status(404).json({ message: "Session not found" });
   }
-  if (!session.eventCount || session.eventCount <= 0) {
+  if (!sessionHasRecording(session)) {
     return res.status(404).json({ message: "This visit has no recording to play" });
   }
   const events = await Event.find({
@@ -450,6 +537,11 @@ router.get("/session/:sessionId", authMiddleware, async (req, res) => {
     hasRrweb: !!session.hasRrweb,
     rrwebStatus: session.rrwebStatus || "none",
     rrwebChunkCount: session.rrwebChunkCount || 0,
+    recordingHealth: session.recordingHealth || {
+      hasFullSnapshot: false,
+      chunkCount: session.rrwebChunkCount || 0,
+      failedChunks: 0
+    },
     rageClickCount: session.rageClickCount || 0,
     deadClickCount: session.deadClickCount || 0,
     errorCount: session.errorCount || 0,
@@ -550,10 +642,79 @@ router.post("/session/events", async (req, res) => {
   res.json({ success: true });
 });
 
+// POST /api/session/end — finalize session on tab close (optional beacon)
+router.post("/session/end", async (req, res) => {
+  try {
+    const { apiKey, sessionId } = req.body;
+    if (!apiKey || !sessionId) {
+      return res.status(400).json({ ok: false, code: "missing_fields" });
+    }
+    const project = await Project.findOne({ apiKey });
+    if (!project) return res.status(403).json({ ok: false, code: "invalid_key" });
+    const session = await Session.findOne({ sessionId, projectId: project._id });
+    if (!session) return res.status(404).json({ ok: false, code: "session_not_found" });
+
+    const now = new Date();
+    await Session.updateOne(
+      { _id: session._id },
+      {
+        $set: {
+          lastActivity: now,
+          duration: now.getTime() - session.startedAt.getTime()
+        }
+      }
+    );
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("session/end error:", err.message);
+    return res.status(500).json({ ok: false, code: "server_error" });
+  }
+});
+
+// POST /api/session/recording-status — upload health from tracker on unload
+router.post("/session/recording-status", async (req, res) => {
+  try {
+    const { apiKey, sessionId, chunksOk, chunksFailed } = req.body;
+    if (!apiKey || !sessionId) {
+      return res.status(400).json({ ok: false, code: "missing_fields" });
+    }
+    const project = await Project.findOne({ apiKey });
+    if (!project) return res.status(403).json({ ok: false, code: "invalid_key" });
+    const session = await Session.findOne({ sessionId, projectId: project._id });
+    if (!session) return res.status(404).json({ ok: false, code: "session_not_found" });
+
+    const inc = {};
+    if (chunksFailed > 0) {
+      inc["recordingHealth.failedChunks"] = Number(chunksFailed) || 0;
+    }
+    const update = {
+      $set: { "recordingHealth.lastChunkAt": new Date() }
+    };
+    if (Object.keys(inc).length > 0) update.$inc = inc;
+
+    await Session.updateOne({ _id: session._id }, update);
+    return res.json({ ok: true, chunksOk: chunksOk || 0 });
+  } catch (err) {
+    console.error("recording-status error:", err.message);
+    return res.status(500).json({ ok: false, code: "server_error" });
+  }
+});
+
 // POST /api/session/rrweb-chunk — rrweb event chunks from upgraded tracker
 router.post("/session/rrweb-chunk", async (req, res) => {
+  const startedAt = Date.now();
   try {
-    const { apiKey, sessionId, chunkIndex, isCheckout, recordedAt, events, body, encoding } = req.body;
+    const {
+      apiKey,
+      sessionId,
+      chunkIndex,
+      segmentId,
+      isCheckout,
+      recordedAt,
+      events,
+      body,
+      encoding
+    } = req.body;
     if (!apiKey || !sessionId) {
       return res.status(400).json({ error: "missing fields" });
     }
@@ -588,11 +749,32 @@ router.post("/session/rrweb-chunk", async (req, res) => {
       return res.status(413).json({ ok: false, code: "chunk_too_large", message: "Chunk exceeds size limit" });
     }
 
+    const idx = chunkIndex || 0;
+    const existingChunk = await Event.findOne({
+      sessionId: session._id,
+      type: "rrweb_chunk",
+      "data.chunkIndex": idx
+    }).lean();
+
+    if (existingChunk) {
+      const existingHash = hashEventsArray(existingChunk.data?.events || []);
+      const newHash = hashEventsArray(eventsArray);
+      if (existingHash === newHash) {
+        return res.status(202).json({ ok: true, duplicate: true });
+      }
+      return res.status(409).json({
+        ok: false,
+        code: "duplicate_chunk_index",
+        message: "Chunk index already used with different payload"
+      });
+    }
+
     const chunkDoc = {
       sessionId: session._id,
       type: "rrweb_chunk",
       data: {
-        chunkIndex: chunkIndex || 0,
+        chunkIndex: idx,
+        segmentId: segmentId || null,
         isCheckout: !!isCheckout,
         events: eventsArray
       },
@@ -602,11 +784,17 @@ router.post("/session/rrweb-chunk", async (req, res) => {
 
     await Event.create(chunkDoc);
 
-    const rrwebStatus = deriveRrwebStatus(session.rrwebStatus, eventsArray, !!isCheckout);
-    if (chunkIndex === 1 && !chunkHasFullSnapshot(eventsArray)) {
-      console.warn(`[rrweb-chunk] session=${sessionId} first chunk missing full snapshot (${eventsArray.length} events, ~${approxBytes} bytes)`);
+    const hasFs = chunkHasFullSnapshot(eventsArray);
+    const prevHasFs = !!(session.recordingHealth && session.recordingHealth.hasFullSnapshot);
+    const rrwebStatus = deriveRrwebStatus(session.rrwebStatus, eventsArray, !!isCheckout, prevHasFs || hasFs);
+
+    if (idx === 1 && !hasFs) {
+      console.warn(
+        `[rrweb-chunk] session=${sessionId} first chunk missing full snapshot (${eventsArray.length} events, ~${approxBytes} bytes)`
+      );
     }
 
+    const newChunkCount = (session.rrwebChunkCount || 0) + 1;
     await Session.updateOne(
       { _id: session._id },
       {
@@ -615,10 +803,18 @@ router.post("/session/rrweb-chunk", async (req, res) => {
           lastActivity: new Date(),
           hasRrweb: true,
           rrwebStatus,
-          duration: Date.now() - session.startedAt.getTime()
+          duration: Date.now() - session.startedAt.getTime(),
+          "recordingHealth.hasFullSnapshot": prevHasFs || hasFs,
+          "recordingHealth.chunkCount": newChunkCount,
+          "recordingHealth.lastChunkAt": new Date()
         }
       }
     );
+
+    const elapsed = Date.now() - startedAt;
+    if (elapsed > 5000) {
+      console.warn(`[rrweb-chunk] slow write session=${sessionId} ms=${elapsed} bytes=${approxBytes}`);
+    }
 
     return res.status(202).json({ ok: true });
   } catch (err) {
@@ -641,9 +837,9 @@ router.get("/session/:sessionId/rrweb-chunks", authMiddleware, async (req, res) 
 
     const chunks = await Event.find(
       { sessionId: session._id, type: "rrweb_chunk" },
-      { "data.chunkIndex": 1, "data.events": 1, "data.isCheckout": 1, timestamp: 1 }
+      { "data.chunkIndex": 1, "data.segmentId": 1, "data.events": 1, "data.isCheckout": 1, timestamp: 1 }
     )
-      .sort({ "data.chunkIndex": 1 })
+      .sort({ "data.segmentId": 1, "data.chunkIndex": 1, timestamp: 1 })
       .lean();
 
     return res.json({
@@ -651,6 +847,7 @@ router.get("/session/:sessionId/rrweb-chunks", authMiddleware, async (req, res) 
       chunkCount: chunks.length,
       chunks: chunks.map((c) => ({
         chunkIndex: c.data.chunkIndex,
+        segmentId: c.data.segmentId || null,
         isCheckout: c.data.isCheckout,
         recordedAt: c.timestamp,
         events: c.data.events
