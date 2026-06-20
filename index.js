@@ -3,6 +3,7 @@ const express = require("express");
 const bodyParser = require("body-parser");
 const cors = require("cors");
 const fs = require("fs");
+const path = require("path");
 const connectDB = require("./utils/db");
 
 //Routes
@@ -39,18 +40,34 @@ app.use("/api", sessionRoutes);
 app.use("/api/tracker", trackerRoutes);
 app.use("/api/projects/:id/goals", goalRoutes);
 
-// Serve tracker.js (snapshot builder + bundled rrweb tracker)
-app.get("/tracker.js", (req, res) => {
-  const builder = fs.readFileSync(__dirname + "/utils/snapshotBuilder.js", "utf8");
-  const bundlePath = __dirname + "/public/tracker.bundle.js";
+let cachedTrackerJs = null;
+
+function loadTrackerJs() {
+  const fullPath = path.join(__dirname, "public", "tracker.js");
+  if (fs.existsSync(fullPath)) {
+    cachedTrackerJs = fs.readFileSync(fullPath, "utf8");
+    return cachedTrackerJs;
+  }
+  const builder = fs.readFileSync(path.join(__dirname, "utils/snapshotBuilder.js"), "utf8");
+  const bundlePath = path.join(__dirname, "public", "tracker.bundle.js");
   let tracker = "";
   if (fs.existsSync(bundlePath)) {
     tracker = fs.readFileSync(bundlePath, "utf8");
   } else {
-    tracker = fs.readFileSync(__dirname + "/tracker.js", "utf8");
+    tracker = fs.readFileSync(path.join(__dirname, "tracker.js"), "utf8");
   }
-  res.setHeader("Content-Type", "application/javascript");
-  res.send(builder + "\n" + tracker);
+  cachedTrackerJs = builder + "\n" + tracker;
+  return cachedTrackerJs;
+}
+
+loadTrackerJs();
+
+// Serve prebuilt tracker.js (snapshot builder + bundled rrweb tracker)
+app.get("/tracker.js", (req, res) => {
+  if (!cachedTrackerJs) loadTrackerJs();
+  res.setHeader("Content-Type", "application/javascript; charset=utf-8");
+  res.setHeader("Cache-Control", "public, max-age=3600");
+  res.send(cachedTrackerJs);
 });
 
 // Local demo page for testing tracker installation and sessions
@@ -59,7 +76,7 @@ app.get("/demo", (req, res) => {
 });
 
 app.get("/version", (req, res) => {
-  res.send("1.0.1");
+  res.send("1.0.2");
 });
 app.listen(PORT, () => {
   console.log(`API listening on port ${PORT}`);

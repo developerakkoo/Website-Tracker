@@ -9,6 +9,27 @@ import { record } from 'rrweb';
 
   if (localStorage.getItem('wt_opt_out') === '1') return;
 
+  /** 'rrweb' (default embed) = no legacy HTML snapshot; 'full' = snapshot + rrweb */
+  var TRACKER_MODE = window.__trackerMode || 'rrweb';
+
+  function usesLegacySnapshot() {
+    return TRACKER_MODE === 'full';
+  }
+
+  function isDebugMode() {
+    try {
+      return window.__trackerDebug === true || /localhost|127\.0\.0\.1/.test(window.location.hostname);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function markApiBlocked(status, code) {
+    if (status === 503 || status >= 500 || code === 'storage_quota') {
+      quotaBlocked = true;
+    }
+  }
+
   var SESSION_TTL_MS = 30 * 60 * 1000;
   var CHUNK_INTERVAL_MS = 3000;
   var BATCH_INTERVAL = 3000;
@@ -182,8 +203,15 @@ import { record } from 'rrweb';
     try {
       if (trySendBeacon(endpoint, payload)) return Promise.resolve(true);
       return fetchWithTimeout(endpoint, trackerFetchOpts(payload, { keepalive: false })).then(function (res) {
+        if (res.status === 503) {
+          uploadStats.chunksFailed += 1;
+          markApiBlocked(503, 'storage_quota');
+          wtWarn('Chunk upload blocked: API storage quota (503)');
+          return false;
+        }
         if (!res.ok) {
           uploadStats.chunksFailed += 1;
+          if (res.status >= 500) markApiBlocked(res.status);
           wtWarn('Chunk upload failed: HTTP ' + res.status);
         } else {
           uploadStats.chunksOk += 1;
@@ -393,6 +421,28 @@ import { record } from 'rrweb';
     } catch (e) {}
   }
 
+  function stopRrwebRecording() {
+    if (typeof stopRecording === 'function') {
+      stopRecording();
+    }
+    stopRecording = null;
+    rrwebBuffer = [];
+  }
+
+  function scheduleDeferredRrweb() {
+    if (stopRecording) return;
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(
+        function () {
+          startRrweb();
+        },
+        { timeout: 3000 }
+      );
+    } else {
+      setTimeout(startRrweb, 1500);
+    }
+  }
+
   function startRrweb() {
     if (stopRecording) return;
     applyBlockClasses();
@@ -409,7 +459,7 @@ import { record } from 'rrweb';
       recordCanvas: false,
       collectFonts: false,
       inlineImages: false,
-      inlineStylesheet: true,
+      inlineStylesheet: false,
       slimDOMOptions: 'all',
       sampling: {
         mousemove: 50,
@@ -435,10 +485,22 @@ import { record } from 'rrweb';
 
   function sendInstallationPing() {
     try {
-      sendRequest(API_BASE + '/api/installation/ping', {
-        apiKey: apiKey,
-        url: window.location.href
-      });
+      var payload = JSON.stringify({ apiKey: apiKey, url: window.location.href });
+      fetch(API_BASE + '/api/installation/ping', trackerFetchOpts(payload))
+        .then(function (res) {
+          if (res.status === 503) {
+            markApiBlocked(503, 'storage_quota');
+            wtWarn('Installation ping blocked: API storage quota (503)');
+            return;
+          }
+          if (!res.ok && res.status >= 500) {
+            markApiBlocked(res.status);
+            wtWarn('Installation ping failed: HTTP ' + res.status);
+          }
+        })
+        .catch(function () {
+          wtWarn('Installation ping network error');
+        });
     } catch (e) {}
   }
 
@@ -471,7 +533,7 @@ import { record } from 'rrweb';
 
   function wtWarn(msg) {
     try {
-      if (window.__trackerDebug || /localhost|127\.0\.0\.1/.test(window.location.hostname)) {
+      if (isDebugMode()) {
         console.warn('[WebsiteTracker]', msg);
       }
     } catch (e) {}
@@ -537,7 +599,7 @@ import { record } from 'rrweb';
   }
 
   function runCaptureSnapshot(force) {
-    if (!sessionInitialized) return;
+    if (!sessionInitialized || !usesLegacySnapshot()) return;
     try {
       var snapshot = buildSnapshotHtml();
       if (!snapshot) return;
@@ -548,6 +610,7 @@ import { record } from 'rrweb';
   }
 
   function scheduleCaptureSnapshot() {
+    if (!usesLegacySnapshot()) return;
     var start = function () {
       captureTimers.forEach(function (t) {
         clearTimeout(t);
@@ -584,6 +647,7 @@ import { record } from 'rrweb';
   }
 
   function captureSnapshot() {
+    if (!usesLegacySnapshot()) return Promise.resolve();
     scheduleCaptureSnapshot();
     runCaptureSnapshot(true);
     return Promise.resolve();
@@ -649,7 +713,7 @@ import { record } from 'rrweb';
           currentPageIndex++;
         }
         addEvent('navigation', { url: href });
-        return captureSnapshot();
+        if (usesLegacySnapshot()) return captureSnapshot();
       })
       .catch(function () {});
   }
@@ -671,8 +735,8 @@ import { record } from 'rrweb';
     }
     hookHistory();
     fetchGoals();
-    startRrweb();
-    captureSnapshot();
+    scheduleDeferredRrweb();
+    if (usesLegacySnapshot()) captureSnapshot();
   }
 
   function initSession() {
@@ -698,6 +762,16 @@ import { record } from 'rrweb';
           console.warn('[WebsiteTracker] Daily session quota reached. Recording stopped.');
           return;
         }
+        if (result.status === 503 && result.data && result.data.code === 'storage_quota') {
+          markApiBlocked(503, 'storage_quota');
+          wtWarn('Session init blocked: API storage quota (503)');
+          return;
+        }
+        if (result.status >= 500) {
+          markApiBlocked(result.status);
+          wtWarn('Session init failed: HTTP ' + result.status);
+          return;
+        }
         if (result.status === 410 && result.data && result.data.expired && !initRetried) {
           clearPersistedSession();
           sessionId = crypto.randomUUID();
@@ -707,10 +781,15 @@ import { record } from 'rrweb';
           initSession();
           return;
         }
-        if (!result.ok) return;
+        if (!result.ok) {
+          wtWarn('Session init failed: HTTP ' + result.status);
+          return;
+        }
         handleInitSuccess(result.data);
       })
-      .catch(function () {});
+      .catch(function () {
+        wtWarn('Session init network error');
+      });
   }
 
   function fetchGoals() {
@@ -922,6 +1001,7 @@ import { record } from 'rrweb';
     if (document.visibilityState === 'hidden') {
       touchSessionExpiry();
       flushEvents();
+      stopRrwebRecording();
     }
   }
 
@@ -991,8 +1071,10 @@ import { record } from 'rrweb';
 
   function initialize() {
     try {
-      installConsoleCapture();
-      installNetworkCapture();
+      if (isDebugMode()) {
+        installConsoleCapture();
+        installNetworkCapture();
+      }
       sendInstallationPing();
       initSession();
       document.addEventListener('click', handleClick, true);

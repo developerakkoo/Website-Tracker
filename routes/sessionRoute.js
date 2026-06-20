@@ -14,6 +14,7 @@ const {
   getMirroredAsset,
   extractFontUrlsFromCss
 } = require("../utils/assetMirror");
+const { isMongoStorageQuotaError, storageQuotaResponse } = require("../utils/mongoStorageError");
 
 const router = express.Router();
 
@@ -149,6 +150,7 @@ async function appendPageToSession(session, url, viewport) {
 
 // Initialize Session (POST /api/session/init)
 router.post("/session/init", async (req, res) => {
+  try {
   const { apiKey, sessionId, url, userAgent, screen, viewport } = req.body;
 
   if (!apiKey || !sessionId) {
@@ -256,6 +258,14 @@ router.post("/session/init", async (req, res) => {
       null
     )
   );
+  } catch (err) {
+    if (isMongoStorageQuotaError(err)) {
+      console.error("session/init storage quota:", err.message || err);
+      return storageQuotaResponse(res);
+    }
+    console.error("session/init error:", err.message || err);
+    return res.status(500).json({ ok: false, code: "server_error", message: "Internal server error" });
+  }
 });
 
 // New page in session (SPA / navigation) — POST /api/session/page
@@ -420,6 +430,10 @@ router.post("/session/capture", async (req, res) => {
       truncated
     });
   } catch (err) {
+    if (isMongoStorageQuotaError(err)) {
+      console.error("Capture storage quota:", err.message || err);
+      return storageQuotaResponse(res);
+    }
     if (err.type === "entity.too.large") {
       return res.status(413).json({ ok: false, code: "payload_too_large", message: "Snapshot payload too large" });
     }
@@ -818,6 +832,10 @@ router.post("/session/rrweb-chunk", async (req, res) => {
 
     return res.status(202).json({ ok: true });
   } catch (err) {
+    if (isMongoStorageQuotaError(err)) {
+      console.error("rrweb-chunk storage quota:", err.message || err);
+      return storageQuotaResponse(res);
+    }
     console.error("rrweb-chunk error:", err.message || err);
     if (err.message && /document too large|BSONObj size/i.test(err.message)) {
       return res.status(413).json({ ok: false, code: "chunk_too_large", message: "Chunk too large to store" });

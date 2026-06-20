@@ -1,5 +1,6 @@
 const express = require("express");
 const Project = require("../modal/project");
+const { isMongoStorageQuotaError, storageQuotaResponse } = require("../utils/mongoStorageError");
 
 const router = express.Router();
 
@@ -26,6 +27,10 @@ router.post("/ping", async (req, res) => {
 
     res.json({ success: true, message: "Installation verified" });
   } catch (error) {
+    if (isMongoStorageQuotaError(error)) {
+      console.error("Installation ping storage quota:", error.message || error);
+      return storageQuotaResponse(res);
+    }
     console.error("Installation ping error:", error);
     res.status(500).json({ message: "Internal server error" });
   }

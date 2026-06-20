@@ -9,3 +9,8 @@ if (process.env.FORCE_TRACKER_BUILD === "1" || !fs.existsSync(bundlePath)) {
 } else {
   console.log("Using existing public/tracker.bundle.js (set FORCE_TRACKER_BUILD=1 to rebuild)");
 }
+
+const fullPath = path.join(__dirname, "..", "public", "tracker.js");
+if (process.env.FORCE_TRACKER_BUILD === "1" || !fs.existsSync(fullPath)) {
+  execSync("node scripts/build-tracker-full.js", { stdio: "inherit" });
+}

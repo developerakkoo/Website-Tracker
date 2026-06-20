@@ -95,6 +95,6 @@ const sessionSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 sessionSchema.index({ sessionId: 1, "pages.startedAt": 1 });
-sessionSchema.index({ startedAt: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 90 });
+sessionSchema.index({ startedAt: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 30 });
 
 module.exports = mongoose.model("Session", sessionSchema);

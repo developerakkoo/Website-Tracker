@@ -4,13 +4,14 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "build:tracker": "node scripts/build-tracker.js",
+    "build:tracker": "node scripts/build-tracker.js && node scripts/build-tracker-full.js",
     "prestart": "node scripts/ensure-tracker-bundle.js",
     "start": "node index.js",
     "predev": "npm run build:tracker",
     "dev": "nodemon index.js",
     "test:session": "node scripts/test-session-continuity.js",
-    "test:replay": "node scripts/test-replay-e2e.js"
+    "test:replay": "node scripts/test-replay-e2e.js",
+    "cleanup:data": "node scripts/cleanup-old-data.js"
   },
   "author": "",
   "license": "ISC",
