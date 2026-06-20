@@ -4,7 +4,9 @@ const bodyParser = require("body-parser");
 const cors = require("cors");
 const fs = require("fs");
 const path = require("path");
+const mongoose = require("mongoose");
 const connectDB = require("./utils/db");
+const trackerRequestLogger = require("./middleware/trackerRequestLogger");
 
 //Routes
 const authRoutes = require('./routes/authRoute');
@@ -28,6 +30,7 @@ app.use(cors({
 // Tracker payloads (snapshots, rrweb chunks) can exceed default 100kb limit
 const TRACKER_BODY_LIMIT = "15mb";
 app.use(bodyParser.json({ limit: TRACKER_BODY_LIMIT }));
+app.use(trackerRequestLogger);
 
 const PORT = process.env.PORT || 3000;
 
@@ -41,6 +44,16 @@ app.use("/api/tracker", trackerRoutes);
 app.use("/api/projects/:id/goals", goalRoutes);
 
 let cachedTrackerJs = null;
+const buildMetaPath = path.join(__dirname, "public", "tracker-build-meta.json");
+
+function loadBuildMeta() {
+  try {
+    if (fs.existsSync(buildMetaPath)) {
+      return JSON.parse(fs.readFileSync(buildMetaPath, "utf8"));
+    }
+  } catch (e) {}
+  return { version: "1.0.3", mode: "rrweb-default", builtAt: null };
+}
 
 function loadTrackerJs() {
   const fullPath = path.join(__dirname, "public", "tracker.js");
@@ -70,18 +83,38 @@ app.get("/tracker.js", (req, res) => {
   res.send(cachedTrackerJs);
 });
 
+app.get("/tracker-version", (req, res) => {
+  res.json(loadBuildMeta());
+});
+
+if (process.env.TRACKER_DEBUG === "1") {
+  app.get("/api/debug/tracker-ping", (req, res) => {
+    res.json({
+      ok: true,
+      mongo: mongoose.connection.readyState === 1 ? "connected" : "disconnected",
+      time: new Date().toISOString(),
+      tracker: loadBuildMeta()
+    });
+  });
+}
+
 // Local demo page for testing tracker installation and sessions
 app.get("/demo", (req, res) => {
   res.sendFile(__dirname + "/home.html");
 });
 
 app.get("/version", (req, res) => {
-  res.send("1.0.2");
+  res.send("1.0.3");
 });
 app.listen(PORT, () => {
+  const meta = loadBuildMeta();
   console.log(`API listening on port ${PORT}`);
+  console.log(`  Tracker build:  v${meta.version} ${meta.builtAt || "unknown"}`);
   console.log(`  Dashboard API:  http://localhost:${PORT}/api`);
   console.log(`  Tracker script: http://localhost:${PORT}/tracker.js`);
   console.log(`  Demo page:      http://localhost:${PORT}/demo`);
   console.log(`  Multi-page demo:http://localhost:${PORT}/demo-mp/`);
+  if (process.env.TRACKER_DEBUG === "1") {
+    console.log(`  Tracker debug:  TRACKER_DEBUG=1 (request logging verbose)`);
+  }
 });

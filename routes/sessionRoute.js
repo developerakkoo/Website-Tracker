@@ -187,6 +187,9 @@ router.post("/session/init", async (req, res) => {
         },
         existing
       );
+      console.info(
+        `[WT-API] session/init ok sessionId=${sessionId} resumed=true newPage=false pageIndex=${pages.length - 1}`
+      );
       return res.json(payload);
     }
 
@@ -200,6 +203,9 @@ router.post("/session/init", async (req, res) => {
         sessionId
       },
       existing
+    );
+    console.info(
+      `[WT-API] session/init ok sessionId=${sessionId} resumed=true newPage=true pageIndex=${pageIndex}`
     );
     return res.json(payload);
   }
@@ -245,6 +251,8 @@ router.post("/session/init", async (req, res) => {
       }
     ]
   });
+
+  console.info(`[WT-API] session/init ok sessionId=${sessionId} resumed=false newPage=true pageIndex=0`);
 
   res.json(
     buildInitPayload(
@@ -653,6 +661,10 @@ router.post("/session/events", async (req, res) => {
     goalClickAggregator.addGoalClicks(project._id, session._id, goalEvents, enabledKeys);
   }
 
+  console.info(
+    `[WT-API] session/events ok sessionId=${sessionId} count=${events.length} types=${[...new Set(events.map((e) => e.type))].join(",")}`
+  );
+
   res.json({ success: true });
 });
 
@@ -829,6 +841,10 @@ router.post("/session/rrweb-chunk", async (req, res) => {
     if (elapsed > 5000) {
       console.warn(`[rrweb-chunk] slow write session=${sessionId} ms=${elapsed} bytes=${approxBytes}`);
     }
+
+    console.info(
+      `[WT-API] session/rrweb-chunk ok sessionId=${sessionId} chunkIndex=${idx} events=${eventsArray.length} bytes=${approxBytes}`
+    );
 
     return res.status(202).json({ ok: true });
   } catch (err) {

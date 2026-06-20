@@ -17,10 +17,29 @@ async function main() {
     target: "chrome80",
     minify: true,
     format: "iife",
+    banner: {
+      js: `/* WT-TRACKER-BUILD: ${new Date().toISOString()} */`
+    }
   });
 
   const sizeKb = (fs.statSync(outfile).size / 1024).toFixed(1);
   console.log(`Built ${path.relative(root, outfile)} (${sizeKb} KB)`);
+
+  const metaPath = path.join(root, "public", "tracker-build-meta.json");
+  fs.writeFileSync(
+    metaPath,
+    JSON.stringify(
+      {
+        version: "1.0.3",
+        mode: "rrweb-default",
+        builtAt: new Date().toISOString()
+      },
+      null,
+      2
+    ),
+    "utf8"
+  );
+  console.log(`Wrote ${path.relative(root, metaPath)}`);
 }
 
 main().catch((err) => {

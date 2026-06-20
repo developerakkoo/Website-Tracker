@@ -3,18 +3,14 @@ import { record } from 'rrweb';
 (function () {
   'use strict';
 
+  var WT_LOG_PREFIX = '[WebsiteTracker]';
+  var WT_TRACKER_VERSION = '1.0.3';
+  var debugSteps = [];
+  var debugPanelEl = null;
+  var rrwebFullSnapshotLogged = false;
+
   var API_BASE = window.__trackerBase || 'http://localhost:3000';
   var apiKey = window.__trackerKey;
-  if (!apiKey) return;
-
-  if (localStorage.getItem('wt_opt_out') === '1') return;
-
-  /** 'rrweb' (default embed) = no legacy HTML snapshot; 'full' = snapshot + rrweb */
-  var TRACKER_MODE = window.__trackerMode || 'rrweb';
-
-  function usesLegacySnapshot() {
-    return TRACKER_MODE === 'full';
-  }
 
   function isDebugMode() {
     try {
@@ -24,9 +20,83 @@ import { record } from 'rrweb';
     }
   }
 
+  function wtLog(level, step, detail) {
+    if (!isDebugMode()) return;
+    var entry = { t: Date.now(), step: step, detail: detail || null };
+    debugSteps.push(entry);
+    if (debugSteps.length > 80) debugSteps.shift();
+    var msg = WT_LOG_PREFIX + ' ' + step + (detail ? ' ' + JSON.stringify(detail) : '');
+    if (level === 'error') console.error(msg);
+    else if (level === 'warn') console.warn(msg);
+    else console.log(msg);
+    updateDebugPanel();
+  }
+
+  function wtWarn(msg) {
+    wtLog('warn', 'warn', { message: msg });
+  }
+
+  function ensureDebugPanel() {
+    if (!isDebugMode() || debugPanelEl) return;
+    try {
+      debugPanelEl = document.createElement('div');
+      debugPanelEl.id = 'wt-debug-panel';
+      debugPanelEl.setAttribute(
+        'style',
+        'position:fixed;bottom:8px;right:8px;z-index:2147483646;max-width:320px;' +
+          'padding:8px 10px;font:11px/1.4 monospace;background:rgba(0,0,0,0.85);color:#0f0;' +
+          'border-radius:6px;pointer-events:none;white-space:pre-wrap;word-break:break-all;'
+      );
+      (document.body || document.documentElement).appendChild(debugPanelEl);
+    } catch (e) {}
+  }
+
+  function updateDebugPanel() {
+    if (!isDebugMode()) return;
+    try {
+      ensureDebugPanel();
+      if (!debugPanelEl) return;
+      var recent = debugSteps.slice(-5);
+      var lines = recent.map(function (e) {
+        return e.step + (e.detail ? ' ' + JSON.stringify(e.detail) : '');
+      });
+      debugPanelEl.textContent =
+        'WT v' +
+        WT_TRACKER_VERSION +
+        ' | init=' +
+        sessionInitialized +
+        ' | chunks ok=' +
+        uploadStats.chunksOk +
+        ' fail=' +
+        uploadStats.chunksFailed +
+        '\n' +
+        lines.join('\n');
+    } catch (e) {}
+  }
+
+  if (!apiKey) {
+    if (window.__trackerDebug) {
+      console.error(WT_LOG_PREFIX + ' boot:abort missing __trackerKey');
+    }
+    return;
+  }
+
+  if (localStorage.getItem('wt_opt_out') === '1') {
+    wtLog('warn', 'boot:opt_out');
+    return;
+  }
+
+  /** 'rrweb' (default embed) = no legacy HTML snapshot; 'full' = snapshot + rrweb */
+  var TRACKER_MODE = window.__trackerMode || 'rrweb';
+
+  function usesLegacySnapshot() {
+    return TRACKER_MODE === 'full';
+  }
+
   function markApiBlocked(status, code) {
     if (status === 503 || status >= 500 || code === 'storage_quota') {
       quotaBlocked = true;
+      wtLog('warn', 'api:blocked', { status: status, code: code || null });
     }
   }
 
@@ -74,9 +144,27 @@ import { record } from 'rrweb';
       stopRecording = null;
       rrwebBuffer = [];
       eventQueue = [];
+      wtLog('log', 'opt:out');
     },
     optIn: function () {
       localStorage.removeItem('wt_opt_out');
+      wtLog('log', 'opt:in');
+    },
+    getDebugState: function () {
+      return {
+        version: WT_TRACKER_VERSION,
+        sessionId: sessionId,
+        sessionInitialized: sessionInitialized,
+        quotaBlocked: quotaBlocked,
+        mode: TRACKER_MODE,
+        chunkIndex: chunkIndex,
+        uploadStats: uploadStats,
+        steps: debugSteps.slice()
+      };
+    },
+    dumpDebug: function () {
+      console.table(debugSteps);
+      return debugSteps.slice();
     }
   };
 
@@ -123,6 +211,14 @@ import { record } from 'rrweb';
     sessionId = crypto.randomUUID();
     persistSession(sessionId);
   }
+
+  wtLog('log', 'boot:start', {
+    mode: TRACKER_MODE,
+    apiBase: API_BASE,
+    hasKey: !!apiKey,
+    version: WT_TRACKER_VERSION
+  });
+  wtLog('log', 'boot:session_id', { sessionId: String(sessionId).slice(0, 8) });
 
   function isTrackerUrl(url) {
     if (!url) return false;
@@ -203,16 +299,17 @@ import { record } from 'rrweb';
     try {
       if (trySendBeacon(endpoint, payload)) return Promise.resolve(true);
       return fetchWithTimeout(endpoint, trackerFetchOpts(payload, { keepalive: false })).then(function (res) {
+        wtLog('log', 'chunk:upload', { status: res.status, ok: res.ok, chunkIndex: chunk.chunkIndex });
         if (res.status === 503) {
           uploadStats.chunksFailed += 1;
           markApiBlocked(503, 'storage_quota');
-          wtWarn('Chunk upload blocked: API storage quota (503)');
+          wtLog('warn', 'chunk:upload', { status: 503, message: 'storage quota' });
           return false;
         }
         if (!res.ok) {
           uploadStats.chunksFailed += 1;
           if (res.status >= 500) markApiBlocked(res.status);
-          wtWarn('Chunk upload failed: HTTP ' + res.status);
+          wtLog('warn', 'chunk:upload', { status: res.status, ok: false });
         } else {
           uploadStats.chunksOk += 1;
         }
@@ -220,9 +317,9 @@ import { record } from 'rrweb';
       }).catch(function (err) {
         uploadStats.chunksFailed += 1;
         if (err && err.name === 'AbortError') {
-          wtWarn('Chunk upload timed out after ' + (UPLOAD_TIMEOUT_MS / 1000) + 's');
+          wtLog('warn', 'chunk:upload', { error: 'timeout', seconds: UPLOAD_TIMEOUT_MS / 1000 });
         } else {
-          wtWarn('Chunk upload network error');
+          wtLog('warn', 'chunk:upload', { error: 'network' });
         }
         if (attempt < MAX_RETRIES) {
           return new Promise(function (r) {
@@ -234,6 +331,7 @@ import { record } from 'rrweb';
         return false;
       });
     } catch (e) {
+      wtLog('error', 'error:chunk_send', { message: e && e.message ? e.message : String(e) });
       return Promise.resolve(false);
     }
   }
@@ -259,6 +357,7 @@ import { record } from 'rrweb';
   }
 
   function replayOfflineChunks() {
+    wtLog('log', 'offline:replay_start');
     return openDb().then(function (db) {
       return new Promise(function (resolve) {
         var tx = db.transaction(STORE, 'readwrite');
@@ -266,6 +365,7 @@ import { record } from 'rrweb';
         var req = store.getAll();
         req.onsuccess = function () {
           var items = req.result || [];
+          wtLog('log', 'offline:replay_pending', { count: items.length });
           var keys = req.result ? [] : [];
           var getAllKeys = store.getAllKeys ? store.getAllKeys() : null;
           if (getAllKeys) {
@@ -285,19 +385,29 @@ import { record } from 'rrweb';
                 });
               });
             });
-            chain.then(resolve);
+            chain.then(function () {
+              wtLog('log', 'offline:replay_done', { count: items.length });
+              resolve();
+            });
           }
         };
         req.onerror = function () {
+          wtLog('warn', 'offline:replay_error');
           resolve();
         };
       });
-    }).catch(function () {});
+    }).catch(function (e) {
+      wtLog('warn', 'offline:replay_error', { message: e && e.message ? e.message : String(e) });
+    });
   }
 
   function handleRrwebEvent(event, isCheckout) {
     if (!sessionInitialized) return;
     rrwebBuffer.push(event);
+    if (event && event.type === RRWEB_FULL_SNAPSHOT && !rrwebFullSnapshotLogged) {
+      rrwebFullSnapshotLogged = true;
+      wtLog('log', 'rrweb:event', { type: event.type, bufferLen: rrwebBuffer.length });
+    }
     if (event && event.type === RRWEB_FULL_SNAPSHOT && !firstChunkSentThisSegment) {
       flushRrwebChunk(true);
       return;
@@ -369,6 +479,10 @@ import { record } from 'rrweb';
     isCheckout = !!isCheckout;
     if (rrwebBuffer.length === 0 || !sessionInitialized) return Promise.resolve();
     var events = rrwebBuffer.splice(0);
+    try {
+      var approxBytes = JSON.stringify(events).length;
+      wtLog('log', 'chunk:flush', { chunkIndex: chunkIndex + 1, events: events.length, bytes: approxBytes, isCheckout: isCheckout });
+    } catch (e) {}
     return flushEventsList(events, isCheckout);
   }
 
@@ -431,6 +545,7 @@ import { record } from 'rrweb';
 
   function scheduleDeferredRrweb() {
     if (stopRecording) return;
+    wtLog('log', 'rrweb:schedule');
     if (typeof requestIdleCallback === 'function') {
       requestIdleCallback(
         function () {
@@ -445,6 +560,7 @@ import { record } from 'rrweb';
 
   function startRrweb() {
     if (stopRecording) return;
+    wtLog('log', 'rrweb:start');
     applyBlockClasses();
     stopRecording = record({
       emit: function (event, isCheckout) {
@@ -485,23 +601,26 @@ import { record } from 'rrweb';
 
   function sendInstallationPing() {
     try {
-      var payload = JSON.stringify({ apiKey: apiKey, url: window.location.href });
+      var pageUrl = window.location.href;
+      wtLog('log', 'init:ping', { url: pageUrl });
+      var payload = JSON.stringify({ apiKey: apiKey, url: pageUrl });
       fetch(API_BASE + '/api/installation/ping', trackerFetchOpts(payload))
         .then(function (res) {
+          wtLog('log', 'init:ping_response', { status: res.status, ok: res.ok });
           if (res.status === 503) {
             markApiBlocked(503, 'storage_quota');
-            wtWarn('Installation ping blocked: API storage quota (503)');
             return;
           }
           if (!res.ok && res.status >= 500) {
             markApiBlocked(res.status);
-            wtWarn('Installation ping failed: HTTP ' + res.status);
           }
         })
-        .catch(function () {
-          wtWarn('Installation ping network error');
+        .catch(function (e) {
+          wtLog('warn', 'init:ping_error', { message: e && e.message ? e.message : 'network' });
         });
-    } catch (e) {}
+    } catch (e) {
+      wtLog('error', 'error:ping', { message: e && e.message ? e.message : String(e) });
+    }
   }
 
   function buildSnapshotHtml() {
@@ -527,14 +646,6 @@ import { record } from 'rrweb';
           sessionId: sessionId,
           url: href
         }))).catch(function () {});
-      }
-    } catch (e) {}
-  }
-
-  function wtWarn(msg) {
-    try {
-      if (isDebugMode()) {
-        console.warn('[WebsiteTracker]', msg);
       }
     } catch (e) {}
   }
@@ -724,9 +835,15 @@ import { record } from 'rrweb';
     persistSession(sessionId);
     segmentId = crypto.randomUUID();
     firstChunkSentThisSegment = false;
+    rrwebFullSnapshotLogged = false;
     var nextIdx = data && typeof data.nextChunkIndex === 'number' ? data.nextChunkIndex : 1;
     chunkIndex = Math.max(0, nextIdx - 1);
     lastHref = window.location.href;
+    wtLog('log', 'init:success', {
+      nextChunkIndex: nextIdx,
+      resumed: !!(data && data.resumed),
+      pageIndex: data && typeof data.pageIndex === 'number' ? data.pageIndex : 0
+    });
     if (data && data.resumed) {
       currentPageIndex = typeof data.pageIndex === 'number' ? data.pageIndex : 0;
       if (data.newPage) addEvent('navigation', { url: lastHref });
@@ -743,10 +860,12 @@ import { record } from 'rrweb';
     if (sessionInitialized || quotaBlocked) return;
     var screen = { width: window.screen.width || 0, height: window.screen.height || 0 };
     var viewport = { width: window.innerWidth || 0, height: window.innerHeight || 0 };
+    var pageUrl = window.location.href;
+    wtLog('log', 'init:request', { sessionId: String(sessionId).slice(0, 8), url: pageUrl });
     fetch(API_BASE + '/api/session/init', trackerFetchOpts(JSON.stringify({
       apiKey: apiKey,
       sessionId: sessionId,
-      url: window.location.href,
+      url: pageUrl,
       userAgent: navigator.userAgent || '',
       screen: screen,
       viewport: viewport
@@ -754,25 +873,31 @@ import { record } from 'rrweb';
       .then(function (res) {
         return res.json().then(function (data) {
           return { ok: res.ok, status: res.status, data: data };
+        }).catch(function () {
+          return { ok: res.ok, status: res.status, data: {} };
         });
       })
       .then(function (result) {
+        wtLog('log', 'init:response', {
+          status: result.status,
+          ok: result.ok,
+          code: result.data && result.data.code ? result.data.code : null
+        });
         if (result.status === 429) {
           quotaBlocked = true;
-          console.warn('[WebsiteTracker] Daily session quota reached. Recording stopped.');
+          wtLog('warn', 'init:quota_daily');
           return;
         }
         if (result.status === 503 && result.data && result.data.code === 'storage_quota') {
           markApiBlocked(503, 'storage_quota');
-          wtWarn('Session init blocked: API storage quota (503)');
           return;
         }
         if (result.status >= 500) {
           markApiBlocked(result.status);
-          wtWarn('Session init failed: HTTP ' + result.status);
           return;
         }
         if (result.status === 410 && result.data && result.data.expired && !initRetried) {
+          wtLog('log', 'init:expired_retry');
           clearPersistedSession();
           sessionId = crypto.randomUUID();
           persistSession(sessionId);
@@ -782,13 +907,12 @@ import { record } from 'rrweb';
           return;
         }
         if (!result.ok) {
-          wtWarn('Session init failed: HTTP ' + result.status);
           return;
         }
         handleInitSuccess(result.data);
       })
-      .catch(function () {
-        wtWarn('Session init network error');
+      .catch(function (e) {
+        wtLog('error', 'error:init_network', { message: e && e.message ? e.message : 'network' });
       });
   }
 
@@ -1002,6 +1126,7 @@ import { record } from 'rrweb';
       touchSessionExpiry();
       flushEvents();
       stopRrwebRecording();
+      wtLog('log', 'visibility:hidden', { stoppedRecording: true });
     }
   }
 
@@ -1071,9 +1196,11 @@ import { record } from 'rrweb';
 
   function initialize() {
     try {
+      wtLog('log', 'boot:initialize');
       if (isDebugMode()) {
         installConsoleCapture();
         installNetworkCapture();
+        ensureDebugPanel();
       }
       sendInstallationPing();
       initSession();
@@ -1085,15 +1212,23 @@ import { record } from 'rrweb';
       chunkInterval = setInterval(function () {
         flushRrwebChunk(false);
       }, CHUNK_INTERVAL_MS);
-    } catch (e) {}
+    } catch (e) {
+      wtLog('error', 'init:crash', { message: e && e.message ? e.message : String(e) });
+    }
   }
 
-  replayOfflineChunks().finally(function () {
-    sendInstallationPing();
-    if (document.readyState === 'complete' || document.readyState === 'interactive') {
-      initialize();
-    } else {
-      window.addEventListener('DOMContentLoaded', initialize);
+  try {
+    replayOfflineChunks().finally(function () {
+      sendInstallationPing();
+      if (document.readyState === 'complete' || document.readyState === 'interactive') {
+        initialize();
+      } else {
+        window.addEventListener('DOMContentLoaded', initialize);
+      }
+    });
+  } catch (fatal) {
+    if (window.__trackerDebug) {
+      console.error(WT_LOG_PREFIX + ' boot:fatal', fatal);
     }
-  });
+  }
 })();

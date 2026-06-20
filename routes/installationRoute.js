@@ -25,6 +25,10 @@ router.post("/ping", async (req, res) => {
     project.lastUrl = url;
     await project.save();
 
+    console.info(
+      `[WT-API] installation/ping ok projectId=${project._id} url=${String(url).slice(0, 80)}`
+    );
+
     res.json({ success: true, message: "Installation verified" });
   } catch (error) {
     if (isMongoStorageQuotaError(error)) {
