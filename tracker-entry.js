@@ -4,10 +4,11 @@ import { record } from 'rrweb';
   'use strict';
 
   var WT_LOG_PREFIX = '[WebsiteTracker]';
-  var WT_TRACKER_VERSION = '1.0.3';
+  var WT_TRACKER_VERSION = '1.0.4';
   var debugSteps = [];
   var debugPanelEl = null;
   var rrwebFullSnapshotLogged = false;
+  var rrwebLoadStarted = false;
 
   var API_BASE = window.__trackerBase || 'http://localhost:3000';
   var apiKey = window.__trackerKey;
@@ -81,16 +82,53 @@ import { record } from 'rrweb';
     return;
   }
 
+  if (window.__trackerDebug) {
+    try {
+      console.log(WT_LOG_PREFIX + ' script:alive v' + WT_TRACKER_VERSION);
+    } catch (e) {}
+  }
+
   if (localStorage.getItem('wt_opt_out') === '1') {
     wtLog('warn', 'boot:opt_out');
     return;
   }
 
-  /** 'rrweb' (default embed) = no legacy HTML snapshot; 'full' = snapshot + rrweb */
+  /** 'rrweb' | 'events' (no replay, safe on heavy sites) | 'full' (legacy snapshot + rrweb) */
   var TRACKER_MODE = window.__trackerMode || 'rrweb';
 
   function usesLegacySnapshot() {
     return TRACKER_MODE === 'full';
+  }
+
+  function usesRrwebRecording() {
+    return TRACKER_MODE === 'rrweb' || TRACKER_MODE === 'full';
+  }
+
+  /** Cheap DOM weight — avoid reading full innerHTML/outerHTML (OOM on Elementor/WP). */
+  function estimatePageWeight() {
+    try {
+      var nodes = document.getElementsByTagName('*').length;
+      var bodyChildren = document.body ? document.body.childElementCount : 0;
+      return { nodes: nodes, bodyChildren: bodyChildren };
+    } catch (e) {
+      return { nodes: 0, bodyChildren: 0 };
+    }
+  }
+
+  var MAX_DOM_NODES_FOR_RRWEB = 3000;
+  var MAX_BODY_CHILDREN_FOR_RRWEB = 500;
+
+  function pageSkipRrwebReason() {
+    if (TRACKER_MODE === 'events') return 'mode_events';
+    if (!usesRrwebRecording()) return 'mode_no_rrweb';
+    var w = estimatePageWeight();
+    if (w.nodes > MAX_DOM_NODES_FOR_RRWEB) return 'dom_nodes_' + w.nodes;
+    if (w.bodyChildren > MAX_BODY_CHILDREN_FOR_RRWEB) return 'body_children_' + w.bodyChildren;
+    return '';
+  }
+
+  function shouldSkipRrweb() {
+    return pageSkipRrwebReason() !== '';
   }
 
   function markApiBlocked(status, code) {
@@ -544,30 +582,38 @@ import { record } from 'rrweb';
   }
 
   function scheduleDeferredRrweb() {
-    if (stopRecording) return;
-    wtLog('log', 'rrweb:schedule');
+    if (stopRecording || rrwebLoadStarted) return;
+    var skipReason = pageSkipRrwebReason();
+    if (skipReason) {
+      wtLog('warn', 'rrweb:skipped', { reason: skipReason, weight: estimatePageWeight() });
+      return;
+    }
+    wtLog('log', 'rrweb:schedule', { delayMs: 8000 });
+    var run = function () {
+      startRrweb();
+    };
     if (typeof requestIdleCallback === 'function') {
-      requestIdleCallback(
-        function () {
-          startRrweb();
-        },
-        { timeout: 3000 }
-      );
+      requestIdleCallback(run, { timeout: 8000 });
     } else {
-      setTimeout(startRrweb, 1500);
+      setTimeout(run, 8000);
     }
   }
 
   function startRrweb() {
-    if (stopRecording) return;
-    wtLog('log', 'rrweb:start');
+    if (stopRecording || rrwebLoadStarted) return;
+    if (shouldSkipRrweb()) {
+      wtLog('warn', 'rrweb:skipped', { reason: pageSkipRrwebReason() });
+      return;
+    }
+    rrwebLoadStarted = true;
+    wtLog('log', 'rrweb:start', { weight: estimatePageWeight() });
     applyBlockClasses();
     stopRecording = record({
       emit: function (event, isCheckout) {
         handleRrwebEvent(event, isCheckout);
       },
-      checkoutEveryNth: 150,
-      checkoutEveryNms: 25000,
+      checkoutEveryNth: 400,
+      checkoutEveryNms: 90000,
       maskAllInputs: true,
       maskInputOptions: { password: true, email: true, tel: true, creditCard: true },
       blockClass: 'wt-no-record',
@@ -578,14 +624,11 @@ import { record } from 'rrweb';
       inlineStylesheet: false,
       slimDOMOptions: 'all',
       sampling: {
-        mousemove: 50,
-        scroll: 100,
+        mousemove: 100,
+        scroll: 200,
         input: 'last'
       }
     });
-    setTimeout(function () {
-      flushRrwebChunk(true);
-    }, 500);
   }
 
   function sendRequest(url, data, useBeacon) {
@@ -852,7 +895,11 @@ import { record } from 'rrweb';
     }
     hookHistory();
     fetchGoals();
-    scheduleDeferredRrweb();
+    if (usesRrwebRecording()) {
+      scheduleDeferredRrweb();
+    } else {
+      wtLog('log', 'rrweb:disabled', { mode: TRACKER_MODE });
+    }
     if (usesLegacySnapshot()) captureSnapshot();
   }
 
@@ -1078,10 +1125,14 @@ import { record } from 'rrweb';
   }
 
   function detectDeadClick(e) {
-    var snapshot = document.body ? document.body.innerHTML.length : 0;
+    var childCount = document.body ? document.body.childElementCount : 0;
     var url = location.href;
     setTimeout(function () {
-      if (document.body && document.body.innerHTML.length === snapshot && location.href === url) {
+      if (
+        document.body &&
+        document.body.childElementCount === childCount &&
+        location.href === url
+      ) {
         reportSpecialEvent('dead_click', e);
       }
     }, 750);
@@ -1209,22 +1260,24 @@ import { record } from 'rrweb';
       window.addEventListener('pagehide', handlePageHide);
       document.addEventListener('visibilitychange', handleVisibilityChange);
       batchInterval = setInterval(sendBatchedEvents, BATCH_INTERVAL);
-      chunkInterval = setInterval(function () {
-        flushRrwebChunk(false);
-      }, CHUNK_INTERVAL_MS);
+      if (usesRrwebRecording()) {
+        chunkInterval = setInterval(function () {
+          flushRrwebChunk(false);
+        }, CHUNK_INTERVAL_MS);
+      }
     } catch (e) {
       wtLog('error', 'init:crash', { message: e && e.message ? e.message : String(e) });
     }
   }
 
   try {
-    replayOfflineChunks().finally(function () {
-      sendInstallationPing();
-      if (document.readyState === 'complete' || document.readyState === 'interactive') {
-        initialize();
-      } else {
-        window.addEventListener('DOMContentLoaded', initialize);
-      }
+    if (document.readyState === 'complete' || document.readyState === 'interactive') {
+      initialize();
+    } else {
+      window.addEventListener('DOMContentLoaded', initialize);
+    }
+    replayOfflineChunks().catch(function (e) {
+      wtLog('warn', 'offline:replay_error', { message: e && e.message ? e.message : String(e) });
     });
   } catch (fatal) {
     if (window.__trackerDebug) {

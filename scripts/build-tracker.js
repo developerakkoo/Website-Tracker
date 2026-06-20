@@ -30,7 +30,7 @@ async function main() {
     metaPath,
     JSON.stringify(
       {
-        version: "1.0.3",
+        version: "1.0.4",
         mode: "rrweb-default",
         builtAt: new Date().toISOString()
       },

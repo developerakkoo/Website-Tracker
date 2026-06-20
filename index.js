@@ -104,7 +104,7 @@ app.get("/demo", (req, res) => {
 });
 
 app.get("/version", (req, res) => {
-  res.send("1.0.3");
+  res.send("1.0.4");
 });
 app.listen(PORT, () => {
   const meta = loadBuildMeta();
